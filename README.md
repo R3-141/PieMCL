@@ -4,6 +4,9 @@ PieMCL is a free, open-source launcher for **Minecraft: Java Edition** on Window
 
 > Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
 
+<img width="1377" height="877" alt="QQ_1792680241635" src="https://github.com/user-attachments/assets/c0d7ae7e-05a0-4f9f-8b15-f784ad972e73" />
+
+
 ## Features
 
 ### Instance Management
@@ -15,17 +18,26 @@ PieMCL is a free, open-source launcher for **Minecraft: Java Edition** on Window
 - Multi-threaded downloads with automatic retry, resumable breakpoints and SHA-1/SHA-256 integrity verification
 - Optional mirror acceleration for Mojang-manifest and Java runtime downloads (useful in regions with poor connectivity)
 
+
 ### Java Management
 - Automatic detection of installed Java runtimes (registry + common paths + `JAVA_HOME`)
 - One-click automatic download and installation of the correct Java major version (Eclipse Temurin) required by each game version
+
+<img width="1377" height="877" alt="QQ_1792682237563" src="https://github.com/user-attachments/assets/08153333-a1d3-447c-9281-3cfb6fbc33ca" />
+
 
 ### Game Launch
 - Strictly follows Mojang's official command-line specification, including conditional JVM arguments, natives extraction and the complete placeholder set for both legacy (`minecraftArguments`) and modern (`arguments`) version formats
 - Live process logs, crash summarization, and clean process shutdown handling
 
+<img width="2218" height="1060" alt="QQ_1792680309806" src="https://github.com/user-attachments/assets/ffb88379-f8b2-46cd-abbd-5606759f5806" />
+
+
 ### Community Resources
 - Built-in browsing and one-click installation of **Mods** (Modrinth and CurseForge), **Data Packs**, **Shader Packs** and **Resource Packs** (Modrinth)
 - Full dependency resolution for mods before installation, update checking, drag-and-drop local installation, and modpack import/export (`.mrpack`)
+
+<img width="1377" height="877" alt="QQ_1792680283483" src="https://github.com/user-attachments/assets/2fe91838-aa83-4889-8b7f-d38cc3ebf00c" />
 
 ### Accounts
 - **Offline accounts** with custom player IDs
