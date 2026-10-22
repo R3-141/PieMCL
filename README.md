@@ -1,4 +1,4 @@
-# PieMCL
+# PieMCL (WIP)
 
 PieMCL is a free, open-source launcher for **Minecraft: Java Edition** on Windows, built with Tauri v2 (Rust + React).
 
