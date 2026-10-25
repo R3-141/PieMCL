@@ -1,0 +1,66 @@
+[package]
+name = "piemcl"
+version = "26.10.25"
+description = "Pie MCL - Minecraft Java 版启动器"
+authors = ["Pie MCL Team"]
+edition = "2024"
+# 多 bin（含开发工具 forge_install）时 cargo run 需要显式默认
+default-run = "piemcl"
+
+[lib]
+# `_lib` 后缀用于避免 Windows 下 lib 名与 bin 名冲突
+name = "piemcl_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 异步运行时：文件 I/O 与网络全部走 tokio
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync", "process"] }
+# HTTP 客户端：版本清单 / 版本 JSON 下载（默认直连；不做系统代理跟随——
+# 残留/失效的系统代理项会把可直连的请求带坏，偶发失败由引擎重试兜底）
+reqwest = { version = "0.12", features = ["json", "multipart", "system-proxy"] }
+# DNS 解析：服务器 SRV 记录查询（_minecraft._tcp）
+hickory-resolver = "0.24"
+# NBT 读写：服务器收藏导入实例 servers.dat
+fastnbt = "2"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v3"] }
+trash = "5"
+opener = { version = "0.8", features = ["reveal"] }
+# 图片解码：截图复制到剪贴板（PNG → RGBA）
+image = { version = "0.25", default-features = false, features = ["png"] }
+tauri-plugin-dialog = "2"
+# 哈希校验：SHA-1（Mojang）与 SHA-256/512（Modrinth/CurseForge），流式计算
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+# Forge/NeoForge mods.toml 元数据解析（模组管理）
+toml = "0.8"
+# 模组图标代理缓存：data URL 编码
+base64 = "0.22"
+# Java 自动管理：Adoptium zip 解压 + 注册表探测（批次 C）
+zip = { version = "2", default-features = false, features = ["deflate"] }
+winreg = "0.52"
+# 启动引擎：进程内存查询 + Windows 强制结束进程
+sysinfo = "0.33"
+# 微软登录：设备码自动复制到系统剪贴板
+arboard = "3"
+# 离线皮肤：内嵌本地 Yggdrasil 会话服务（authlib-injector 配套）
+axum = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+# 后续阶段按需引入：zip（Java 解压）、winreg（注册表 Java 探测，批次 C）等
+# 参考 https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

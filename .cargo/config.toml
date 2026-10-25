@@ -1,0 +1,14 @@
+# 项目级 crates.io 镜像（rsproxy.cn），加速国内依赖下载
+# 如不需要可直接删除本文件
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+retry = 3
+git-fetch-with-cli = true

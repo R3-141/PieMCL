@@ -1,0 +1,210 @@
+@import "tailwindcss";
+
+/* class 策略深色模式：.dark 加在根节点 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 深色模式：让原生控件（下拉弹出列表、滚动条等）跟随深色渲染 */
+.dark {
+  color-scheme: dark;
+}
+
+/* 原生 select 选项底色（Windows 弹出列表不继承 Tailwind 类，需显式指定） */
+select option {
+  @apply bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100;
+}
+
+:root {
+  /* 主色及其派生：JS 仅改 --accent，其余由 color-mix 派生 */
+  --accent: #4f7cff;
+  --accent-hover: color-mix(in srgb, var(--accent) 85%, black);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+
+  /* 磨砂框架：叠加色（浅色默认白，深色默认 neutral-900）与浓度（0–1，设置页滑块控制） */
+  --frame-tint: 255 255 255;
+  --blur-strength: 0.7;
+}
+
+.dark {
+  --frame-tint: 23 23 23;
+}
+
+/* 磨砂框架分层：标题栏最深（视觉切割），内容区最透。
+   浓度系数：标题 1.0 / 抽屉 0.85 / 侧栏 0.6 / 内容 0.28 */
+.frame-title {
+  background-color: rgb(var(--frame-tint) / var(--blur-strength));
+}
+.frame-drawer {
+  background-color: rgb(var(--frame-tint) / calc(var(--blur-strength) * 0.85));
+}
+.frame-side {
+  background-color: rgb(var(--frame-tint) / calc(var(--blur-strength) * 0.6));
+}
+.frame-content {
+  background-color: rgb(var(--frame-tint) / calc(var(--blur-strength) * 0.28));
+}
+
+/* 像素风格字体（随应用打包）：GNU Unifont 16px，拉丁与 CJK 字形全覆盖，
+   个别缺字回退微软雅黑 */
+@font-face {
+  font-family: 'Unifont';
+  src: url('./assets/fonts/unifont-16px.otf') format('opentype');
+  font-display: swap;
+}
+
+/* 全局字体：Unifont 优先（含中文），个别缺字回退雅黑 */
+@theme inline {
+  --font-sans: 'Unifont', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+}
+
+/* 映射为 Tailwind 工具类：bg-accent / text-accent / bg-accent-soft / hover:bg-accent-hover 等 */
+@theme inline {
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  /* 磨砂质感：窗口透明 + 系统 Acrylic，body 必须透明让模糊背景透出；
+     内容区（main）用实色盖住，仅标题栏与侧栏半透明 */
+  background: transparent;
+}
+
+/* 全局字体显式应用（Tailwind preflight 之外兜底） */
+body {
+  font-family: var(--font-sans);
+}
+
+body {
+  @apply text-neutral-900 antialiased dark:text-neutral-100;
+}
+
+/* 模态框进入动画（时长受 .reduce-motion 压缩） */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+}
+
+/* 减少动画：全局压缩过渡与动画时长 */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+/* 禁用全局文字选取（桌面应用观感，避免拖动时误选文字）；
+   输入框、文本域与日志内容（pre）保留选取以便复制 */
+body {
+  user-select: none;
+}
+input,
+textarea,
+pre,
+[contenteditable='true'] {
+  user-select: text;
+}
+
+/* 过渡动画 keyframes（均受 reduce-motion 全局压缩） */
+/* page-in 入场位移向上：向下位移会让 overflow-y-auto 容器在动画期间出现滚动条闪现 */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes item-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 现代化滚动条：细条圆角、透明轨道，悬停加深（WebView2 Chromium 内核） */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgb(0 0 0 / 0.18);
+  border-radius: 9999px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(0 0 0 / 0.34);
+}
+.dark ::-webkit-scrollbar-thumb {
+  background-color: rgb(255 255 255 / 0.18);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(255 255 255 / 0.34);
+}
+
+/* 自定义背景模式（.has-bg 挂在 window-root；.dark 挂在 html）：
+   按实际生效的界面深浅分别覆盖卡片常用底色 bg-white / dark:bg-neutral-900。
+   --card-alpha 由「卡片不透明度」滑块控制（1 = 不透明），
+   --card-tint(-dark) 由「卡片颜色」自定义（默认浅白 / 深黑）。
+   注意：不可在此给变量定义默认值声明，否则直接声明会覆盖根节点继承的滑块值 */
+html:not(.dark) .has-bg .bg-white {
+  background-color: rgb(var(--card-tint, 255 255 255) / var(--card-alpha));
+}
+html.dark .has-bg .dark\:bg-neutral-900 {
+  background-color: rgb(var(--card-tint-dark, 23 23 23) / var(--card-alpha));
+}
+
+/* 卡片磨砂：在不透明度基础上叠加背景模糊（设置页开关） */
+html:not(.dark) .has-bg.card-blur .bg-white,
+html.dark .has-bg.card-blur .dark\:bg-neutral-900 {
+  backdrop-filter: blur(14px);
+}
+
+/* 卡片描边淡化：背景图上生硬的实色边框改为极淡的融入式描边 */
+html:not(.dark) .has-bg .border-neutral-200 {
+  border-color: rgb(23 23 23 / 0.08);
+}
+html.dark .has-bg .dark\:border-neutral-800 {
+  border-color: rgb(255 255 255 / 0.08);
+}
+
+/* MOTD §k 混淆码：闪烁抖动模拟（服务器页） */
+.motd-obf {
+  display: inline-block;
+  animation: motd-obf 0.4s steps(2, jump-none) infinite;
+}
+@keyframes motd-obf {
+  0% { transform: translateX(0); opacity: 1; }
+  50% { transform: translateX(1px) skewX(-12deg); opacity: 0.75; }
+  100% { transform: translateX(-1px) skewX(10deg); opacity: 0.9; }
+}
