@@ -1,5 +1,4 @@
-# PieMCL
-
+<img width="1535" height="500" alt="mcl" src="https://github.com/user-attachments/assets/18553c84-1136-4124-beec-ba4b96b13bf0" />
 PieMCL 是一款免费开源的 **Minecraft: Java Edition** Windows 启动器，基于 Tauri v2（Rust + React）构建。
 
 > 非官方 Minecraft 产品，未获得 Mojang 或 Microsoft 认可，与之无关联。
