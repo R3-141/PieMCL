@@ -3,7 +3,7 @@ PieMCL 是一款免费开源的 **Minecraft: Java Edition** Windows 启动器，
 
 > 非官方 Minecraft 产品，未获得 Mojang 或 Microsoft 认可，与之无关联。
 
-中文 | [English](./README_en.md)
+中文 | [English](./README_en.md) | [免责声明](./DISCLAIMER.md)
 
 ## 功能
 
