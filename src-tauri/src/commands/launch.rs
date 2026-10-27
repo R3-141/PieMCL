@@ -141,6 +141,10 @@ async fn run_launch(
     let account_ref = account;
     let auth = if account_ref.is_offline() {
         args::AuthContext::offline(&account_ref.name)
+    } else if account_ref.is_authlib() {
+        // 校验/刷新皮肤站 token 后返回认证参数（刷新会写回 accounts.json）
+        let root = deps.paths.root().to_path_buf();
+        crate::account::authlib_auth::ensure_authlib_auth(account_ref, &root).await?
     } else {
         // 校验/刷新微软 token 后返回真实认证参数（刷新会写回 accounts.json）
         let root = deps.paths.root().to_path_buf();
@@ -163,6 +167,9 @@ async fn run_launch(
                 account_ref.name.clone(),
                 skin_meta.variant.clone(),
                 png,
+                // 皮肤版本号（fetchedAt）：换皮肤后纹理 URL 随之变化，
+                // 击穿 MC 客户端 {game_dir}/assets/skins/ 的持久皮肤缓存
+                skin_meta.fetched_at.to_string(),
             )
             .await?;
             eprintln!("[local-ygg] 注入 javaagent（端口 {}）", handle.port);
@@ -172,6 +179,16 @@ async fn run_launch(
                 handle.port
             ));
             ygg_handle = Some(handle);
+        }
+    } else if account_ref.is_authlib() {
+        // 皮肤站账户：注入 agent 指向 API 根（authlib-injector 规范：agent 直接
+        // GET 该地址获取元数据，须传 api_root 而非站点根），游戏内认证/皮肤由皮肤站托管
+        if let Some(api_root) = &account_ref.auth_api_root {
+            emit("checking_java", "正在准备皮肤站注入…");
+            let jar =
+                crate::account::local_ygg::ensure_agent_jar(&deps.paths.cache_dir()).await?;
+            eprintln!("[authlib] 注入 javaagent（API 根 {api_root}）");
+            extra_jvm.push(format!("-javaagent:{}={}", jar.display(), api_root));
         }
     }
 
@@ -192,11 +209,16 @@ async fn run_launch(
             }
             if let Some(m) = max {
                 if found.version > m {
-                    return Err(format!(
-                        "指定的 Java {} 高于该版本允许的上限（Java {m} 及更早），\
-                         旧版本 Minecraft 与新 Java 不兼容，请在实例设置中更换",
-                        found.version
-                    ));
+                    // 手动指定的 Java 超出常规上限：仅警告不拦截（用户比规则表更清楚
+                    // 自己的整合包/加载器能否在新 Java 上跑；低于是必崩才硬拒绝）
+                    emit(
+                        "checking_java",
+                        &format!(
+                            "警告：指定的 Java {} 高于 MC {} 的常规上限（Java {m}），\
+                             老加载器/老版本可能不兼容；已按你的选择继续启动",
+                            found.version, mc_version
+                        ),
+                    );
                 }
             }
             found.clone()
@@ -210,7 +232,7 @@ async fn run_launch(
             match args::select_java(&javas, required, max) {
                 Some(j) => j.clone(),
                 None => {
-                    // 自动补装缺失的 Java（Adoptium，TUNA 镜像优先），装完重新检测再选择
+                    // 自动补装缺失的 Java（Adoptium，TUNA 镜像优先）
                     // 列出已检测到的版本，说明为什么需要下载（消除"有 Java 还下载"的困惑）
                     let found = if javas.is_empty() {
                         "未检测到本机有任何 Java".to_string()
@@ -225,7 +247,10 @@ async fn run_launch(
                         "downloading",
                         &format!("{found}，正在自动下载安装…"),
                     );
-                    crate::commands::java::install_java(
+                    // 直接采信 install_java 返回的验证结果（顺序探测、重试 5 次、
+                    // 失败即安装失败并携带诊断信息），不再做全量重扫——
+                    // 重扫是此前"已下载安装但探测验证失败"漏检的根源
+                    let (_, info) = crate::commands::java::install_java(
                         &deps.app,
                         &deps.download,
                         deps.active_downloads.clone(),
@@ -235,18 +260,11 @@ async fn run_launch(
                     )
                     .await
                     .map_err(String::from)?;
-                    let rescan = deps.paths.clone();
-                    let javas2 =
-                        tauri::async_runtime::spawn_blocking(move || detect::detect_all(&rescan))
-                            .await
-                            .map_err(|e| format!("检测任务执行失败：{e}"))?;
-                    args::select_java(&javas2, required, max)
-                        .cloned()
-                        .ok_or_else(|| {
-                            format!(
-                                "Java {required} 已安装但未被检测到，请重启启动器后重试"
-                            )
-                        })?
+                    emit(
+                        "checking_java",
+                        &format!("已安装并验证 Java {}（{}）", info.version, info.path),
+                    );
+                    info
                 }
             }
         }
@@ -427,6 +445,18 @@ async fn run_launch(
 
     // ---- 6. 构建命令 ----
     emit("building", "正在组装启动参数…");
+    // 自动分配内存：开启时按物理内存计算，覆盖手动值
+    let mut jvm = detail.jvm.clone();
+    if jvm.auto_memory {
+        let total = args::total_memory_mb();
+        let mx = args::auto_memory_mb(total);
+        emit(
+            "building",
+            &format!("已自动分配内存：{mx} MB（物理内存 {total} MB）"),
+        );
+        jvm.min_memory_mb = mx;
+        jvm.max_memory_mb = mx;
+    }
     // 直连服务器：SRV 解析（含阻塞 DNS，放阻塞线程）
     let server = if let Some(addr) = &server_address {
         emit("building", &format!("正在解析服务器地址 {addr}…"));
@@ -441,7 +471,7 @@ async fn run_launch(
         game_dir: &game_dir,
         natives_dir: &natives_dir,
         java: &java,
-        jvm: &detail.jvm,
+        jvm: &jvm,
         player_name: &player_name,
         auth: &auth,
         extra_jvm: &extra_jvm,
@@ -470,6 +500,8 @@ async fn run_launch(
     let killed_set = deps.killed.clone();
     let log_paths = deps.paths.clone();
     let command_summary = plan.summary.clone();
+    // 「启动时隐藏启动器」开关快照（启动时刻的设置值）
+    let hide_on_launch = deps.settings.read().await.hide_on_launch;
     // 离线皮肤本地会话服务：游戏退出时关闭（Arc+Mutex 包装以兼容 Fn 闭包）
     let ygg_slot: Arc<StdMutex<Option<crate::account::local_ygg::LocalYggHandle>>> =
         Arc::new(StdMutex::new(ygg_handle));
@@ -495,6 +527,14 @@ async fn run_launch(
             }),
         );
         running_map.lock().unwrap().remove(&iid_exit);
+        // 隐藏模式下：全部游戏退出后立即恢复显示启动器
+        if hide_on_launch && running_map.lock().unwrap().is_empty() {
+            if let Some(win) = app_exit.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }
     };
 
     let running = process::spawn_game(&plan, on_log, on_exit).map_err(String::from)?;
@@ -504,6 +544,50 @@ async fn run_launch(
         .insert(instance_id.to_string(), running.clone());
     // 记录最后启动时间（进程拉起即记；写入失败静默，不影响启动流程）
     deps.instances.touch_launched(instance_id).await;
+    // 广播实例列表刷新：首页「最近启动」目标、实例页排序等都依赖此事件
+    let _ = deps
+        .app
+        .emit("instances-changed", json!({ "id": instance_id }));
+
+    // 启动实例时隐藏启动器（设置开启时）：等游戏窗口出现后再隐藏——
+    // 进程拉起即隐藏会让用户误以为启动器闪退（MC 初始化可能长达数十秒）。
+    // 轮询 500ms / 最长 180s；等待期间实例退出则放弃隐藏（避免"隐藏了却没窗口"）；
+    // 超时仍无窗口（进程存活）也隐藏，保持该功能的既有语义。
+    // 全部游戏退出后在 on_exit 恢复。
+    if hide_on_launch {
+        let app_hide = deps.app.clone();
+        let running_map_hide = deps.running.clone();
+        let iid_hide = instance_id.to_string();
+        let pid = running.pid;
+        tauri::async_runtime::spawn(async move {
+            const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+            let mut waited = std::time::Duration::ZERO;
+            let mut window_seen = false;
+            while waited < TIMEOUT {
+                if !running_map_hide.lock().unwrap().contains_key(&iid_hide) {
+                    return; // 游戏已退出（未出现过窗口）：不隐藏
+                }
+                if crate::launch::process::pid_has_visible_window(pid) {
+                    window_seen = true;
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+                waited += POLL;
+            }
+            if !running_map_hide.lock().unwrap().contains_key(&iid_hide) {
+                return;
+            }
+            if let Some(win) = app_hide.get_webview_window("main") {
+                let _ = win.hide();
+            }
+            if !window_seen {
+                eprintln!(
+                    "[launch] 等待游戏窗口超时（180s，PID {pid}），按既有语义隐藏启动器"
+                );
+            }
+        });
+    }
 
     let _ = deps.app.emit(
         "launch-state",

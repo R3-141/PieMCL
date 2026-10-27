@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "piemcl"
-version = "26.10.25"
+version = "26.10.27"
 dependencies = [
  "arboard",
  "axum",

@@ -21,8 +21,8 @@ use std::os::windows::process::CommandExt;
 use super::model::JavaInfo;
 use crate::core::paths::LauncherPaths;
 
-/// 单次探测超时
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// 单次探测超时（JVM 冷启动 + 磁盘繁忙时的容忍窗口）
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// MC 版本要求的最低 Java 主版本（规则表兜底）
 ///
@@ -72,8 +72,13 @@ pub fn required_java_from_json(version_json: &serde_json::Value) -> Option<u32> 
 ///   URLClassLoader，Java 9+ 直接 ClassCastException 崩溃；1.13–1.16 官方
 ///   推荐同为 Java 8
 /// - 1.17+        → None（满足下限即可，无上限）
-/// - 26.x（新版本号方案，年份式版本号）→ None：高版本 Java，无上限
+/// - 26.x（新版本号方案，年份式版本）→ None：高版本 Java，无上限
 /// - 经典版（rd-xxx / a1.x / b1.x 等非纯数字首段）→ Some(8)
+///
+/// 官方 javaVersion.majorVersion 参照（piston-meta v2，2026-10 实测）：
+/// ≤1.16.5=8、1.17=16、1.18–1.20.4=17、1.20.5+=21、26.x=25。
+/// 注意：本上限只用于**自动选择**的保守过滤；用户**手动指定**的 Java
+/// 超上限时仅警告放行（低于是必崩才硬拒绝）。
 pub fn max_java(mc_version: &str) -> Option<u32> {
     let parts: Vec<&str> = mc_version.trim().split('.').collect();
     if parts.len() >= 2 {
@@ -310,8 +315,11 @@ fn program_files_roots() -> Vec<PathBuf> {
         .collect()
 }
 
-/// 探测单个 java.exe（带超时：进程挂死时 kill 并返回 None）
-fn probe_java_with_timeout(path: &Path) -> Option<JavaInfo> {
+/// 探测单个 java.exe（带超时与完整诊断）。
+/// 成功返回 JavaInfo；失败返回可读原因（超时 / 异常退出码 / stderr 尾部），
+/// 调用方可直接把该字符串拼进错误信息，不再依赖猜测性文案。
+/// stdout/stderr 双管道并发读到底，消除管道缓冲写满导致子进程卡死的可能。
+pub fn probe_java_detailed(path: &Path) -> Result<JavaInfo, String> {
     let mut cmd = Command::new(path);
     cmd.arg("-XshowSettings:properties")
         .arg("-version")
@@ -320,52 +328,121 @@ fn probe_java_with_timeout(path: &Path) -> Option<JavaInfo> {
     // GUI 进程派生控制台程序时 Windows 会分配新控制台，检测 probe 必须隐藏黑窗
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    let mut child = cmd.spawn().ok()?;
+    let mut child = cmd.spawn().map_err(|e| format!("无法启动进程：{e}"))?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
+
+    // 两条管道各自在独立线程读到底：JVM 输出可能超出管道缓冲，
+    // 不排空会卡死子进程；wait 与 read 并发进行
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = stdout_pipe.as_mut() {
+            use std::io::Read;
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = stderr_pipe.as_mut() {
+            use std::io::Read;
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // 进程已退出，取输出。按字节读再 lossy 解码：
-                // JVM 重定向到管道的 stderr 用本机编码（中文 Windows = GBK），
-                // 含非 ASCII（如中文安装路径的 java.home）时 UTF-8 严格解码会
-                // 中途报错，丢掉排在后面的 java.version / os.arch 行
-                let mut stderr = child.stderr.take()?;
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                let _ = stderr.read_to_end(&mut bytes);
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                if !status.success() && text.is_empty() {
-                    return None;
+                let err = err_reader.join().unwrap_or_default();
+                // 按字节读再 lossy 解码：JVM 重定向到管道的 stderr 用本机编码
+                //（中文 Windows = GBK），含非 ASCII（如中文路径的 java.home）时
+                // UTF-8 严格解码会中途报错，丢掉后面的 java.version / os.arch 行
+                let text = String::from_utf8_lossy(&err).into_owned();
+                if let Some((version, arch, vendor)) = parse_probe_output(&text) {
+                    return Ok(JavaInfo {
+                        path: path.to_string_lossy().to_string(),
+                        version,
+                        arch,
+                        vendor,
+                        // custom 由 detect_all 依据手动登记列表统一标记
+                        custom: false,
+                    });
                 }
-                let (version, arch, vendor) = parse_probe_output(&text)?;
-                return Some(JavaInfo {
-                    path: path.to_string_lossy().to_string(),
-                    version,
-                    arch,
-                    vendor,
-                });
+                let tail = tail_chars(&text, 200);
+                if status.success() {
+                    return Err(format!(
+                        "java 正常退出但未输出版本信息（stderr 尾部：{tail}）"
+                    ));
+                }
+                return Err(format!(
+                    "java 异常退出（退出码 {}，stderr 尾部：{tail}）",
+                    status.code().unwrap_or(-1)
+                ));
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    return None;
+                    let _ = child.wait();
+                    return Err(format!(
+                        "java 执行超时（{} 秒无响应，已终止进程）",
+                        PROBE_TIMEOUT.as_secs()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(_) => return None,
+            Err(e) => return Err(format!("等待 java 进程失败：{e}")),
         }
     }
 }
 
-/// 全量检测：扫描候选并逐一探测
-pub fn detect_all(paths: &LauncherPaths) -> Vec<JavaInfo> {
-    collect_candidates(paths)
-        .iter()
-        .filter_map(|p| probe_java_with_timeout(p))
-        .collect()
+/// 取字符串尾部最多 n 个字符（错误信息展示 stderr 尾部用）
+fn tail_chars(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    s.chars().skip(count - n).collect()
 }
 
-/// 探测单个 java.exe / 其所在目录（供手动登记入口校验路径有效性）：
+/// 探测单个 java.exe（带超时）：成功返回 JavaInfo，失败静默 None。
+/// detect_all 并行扫描用（每个候选一次机会）；需要诊断信息的场景用 probe_java_detailed
+pub fn probe_java_with_timeout(path: &Path) -> Option<JavaInfo> {
+    probe_java_detailed(path).ok()
+}
+
+/// 全量检测：扫描候选并逐一探测。
+/// 并行探测（每候选一个线程）：候选可能多达数十个，串行时最坏 候选数×超时，
+/// 并行压到 ≤超时。
+pub fn detect_all(paths: &LauncherPaths) -> Vec<JavaInfo> {
+    // 手动登记路径集合（canonicalize 归一）：候选位于登记路径之内即标记 custom
+    let customs: std::collections::BTreeSet<PathBuf> = custom_java_paths(paths)
+        .into_iter()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p))
+        .collect();
+    let handles: Vec<_> = collect_candidates(paths)
+        .into_iter()
+        .map(|p| {
+            let customs = customs.clone();
+            std::thread::spawn(move || {
+                probe_java_with_timeout(&p).map(|mut info| {
+                    let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+                    info.custom = customs.iter().any(|c| canon.starts_with(c));
+                    info
+                })
+            })
+        })
+        .collect();
+    let mut out: Vec<JavaInfo> = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok().flatten())
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// 对单个 java.exe / 其所在目录（供手动登记入口校验路径有效性）：
 /// 传入目录时自动尝试 {dir}\bin\java.exe 与 {dir}\java.exe
 pub fn probe_java_path(path: &Path) -> Option<JavaInfo> {
     if path.is_file() {
@@ -378,6 +455,76 @@ pub fn probe_java_path(path: &Path) -> Option<JavaInfo> {
                     return Some(info);
                 }
             }
+        }
+    }
+    None
+}
+
+/// 定向探测（含重试与完整诊断）：传入 java.exe 或其所在目录，
+/// 全部尝试失败时返回最后一次的失败原因（供错误信息直接展示）。
+/// 新解压的 java.exe 首次执行可能被系统文件扫描/磁盘繁忙拖慢，
+/// 顺序重试直到跑通；每次都是单独的探测窗口
+pub fn probe_java_path_with_retry_detailed(path: &Path, attempts: u32) -> Result<JavaInfo, String> {
+    let mut last_err = String::from("路径不存在或不是文件");
+    for i in 0..attempts {
+        match probe_target(path) {
+            Ok(info) => return Ok(info),
+            Err(e) => last_err = e,
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    Err(last_err)
+}
+
+/// 探测目标（文件或目录），带诊断信息的 probe_java_path 对应物
+fn probe_target(path: &Path) -> Result<JavaInfo, String> {
+    if path.is_file() {
+        return probe_java_detailed(path);
+    }
+    if path.is_dir() {
+        let mut last_err = String::from("目录下未找到 java.exe");
+        for cand in [path.join("bin").join("java.exe"), path.join("java.exe")] {
+            if cand.is_file() {
+                match probe_java_detailed(&cand) {
+                    Ok(info) => return Ok(info),
+                    Err(e) => last_err = e,
+                }
+            }
+        }
+        return Err(last_err);
+    }
+    Err(format!("路径不存在：{}", path.display()))
+}
+
+/// 探测下载缓存目录 {root}/java/{major}/：目录本身或其一级子目录
+/// （如 jdk-25.0.4.1+1-jre\）都可能是运行时根
+pub fn probe_java_cache_dir(dir: &Path) -> Option<JavaInfo> {
+    if let Some(info) = probe_java_path(dir) {
+        return Some(info);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for e in entries.flatten() {
+        if e.path().is_dir() {
+            if let Some(info) = probe_java_path(&e.path()) {
+                return Some(info);
+            }
+        }
+    }
+    None
+}
+
+/// 探测缓存目录（含重试，同 probe_java_path_with_retry）
+pub fn probe_java_cache_dir_with_retry(dir: &Path, attempts: u32) -> Option<JavaInfo> {
+    for i in 0..attempts {
+        if let Some(info) = probe_java_cache_dir(dir) {
+            return Some(info);
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
     None

@@ -171,11 +171,29 @@ export function InstancesView() {
               {/* 左列：实例列表卡片（标题固定，列表区内滚动） */}
               <div className="flex w-72 shrink-0 flex-col pb-6 pl-6 pt-6">
                 <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
-                  <div className="shrink-0 px-4 pt-4">
-                    <h1 className="text-lg font-semibold">实例</h1>
-                    <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
-                      共 {instances.length} 个实例
-                    </p>
+                  <div className="flex shrink-0 items-start justify-between px-4 pt-4">
+                    <div>
+                      <h1 className="text-lg font-semibold">实例</h1>
+                      <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
+                        共 {instances.length} 个实例
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void refresh()}
+                      title="刷新实例列表（重新扫描 versions 目录）"
+                      className="rounded-md p-1 text-neutral-400 transition-colors duration-150 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300"
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" className="size-3.5">
+                        <path
+                          d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2.6h-2.6"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
                   </div>
                   <div className="min-h-0 flex-1 overflow-y-auto p-3">
                     <div className="space-y-1">

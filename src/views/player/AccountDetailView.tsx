@@ -4,13 +4,27 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ipc } from '../../lib/ipc'
 import { useUiStore } from '../../stores/uiStore'
-import type { AccountView } from '../../types/domain'
+import type { AccountView, OfflineSkinMeta } from '../../types/domain'
 import { IconPlus } from '../../components/common/Icons'
 import { Modal } from '../../components/common/Modal'
 import { SkinCanvas } from './SkinCanvas'
 import { CapePreview } from './CapePreview'
 
 type Variant = 'slim' | 'classic'
+
+/** 离线皮肤来源的可读标签 */
+function offlineSourceLabel(s: OfflineSkinMeta): string {
+  switch (s.source) {
+    case 'file':
+      return `本地文件「${s.sourceName}」`
+    case 'url':
+      return `URL 皮肤（${s.sourceName}）`
+    case 'preset':
+      return `预设皮肤 ${s.sourceName}`
+    default:
+      return `来自玩家「${s.sourceName}」`
+  }
+}
 
 /** 贴图 URL → data URL（经 Rust 代理，绕开 http 混合内容与直连失败） */
 function useTextureDataUrl(url: string | null | undefined): string | null {
@@ -37,8 +51,27 @@ function useTextureDataUrl(url: string | null | undefined): string | null {
 
 export function AccountDetailView({ account, onBack }: { account: AccountView; onBack: () => void }) {
   const isMicrosoft = account.kind === 'microsoft'
+  const isAuthlib = account.kind === 'authlib'
   const activeSkin = account.skins.find((s) => s.state === 'ACTIVE') ?? null
   const activeCape = account.capes.find((c) => c.id === account.activeCapeId) ?? null
+
+  // 皮肤站角色当前皮肤（3D 预览用）
+  const [authlibSkin, setAuthlibSkin] = useState<{ dataUrl: string; model: string } | null>(null)
+  useEffect(() => {
+    let alive = true
+    setAuthlibSkin(null)
+    if (account.kind === 'authlib') {
+      ipc
+        .getAuthlibSkinData(account.id)
+        .then((d) => {
+          if (alive && d) setAuthlibSkin({ dataUrl: d.dataUrl, model: d.model })
+        })
+        .catch(() => {})
+    }
+    return () => {
+      alive = false
+    }
+  }, [account.id, account.kind])
 
   // 3D 预览贴图（data URL）
   const skinTex = useTextureDataUrl(activeSkin?.url)
@@ -79,6 +112,53 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
   const handleRemoveOfflineSkin = async () => {
     if (!window.confirm('移除离线皮肤？游戏内将恢复默认外观。')) return
     await act('remove-offline', () => ipc.removeOfflineSkin(account.id), '已移除离线皮肤')
+  }
+
+  // 离线皮肤多来源（预设 / 本地文件 / URL）
+  const [offlineUrlInput, setOfflineUrlInput] = useState('')
+  const handleOfflineFile = () =>
+    act('offline-file', () => ipc.applyOfflineSkinFile(account.id), '已应用本地皮肤文件')
+  const handleOfflineUrl = async () => {
+    const url = offlineUrlInput.trim()
+    if (!url) return
+    await act('offline-url', () => ipc.applyOfflineSkinUrl(account.id, url), '已应用 URL 皮肤')
+    setOfflineUrlInput('')
+  }
+
+  // 暂存选择（预设 + 模型）：点「应用设定」才提交，未选择时跟随当前皮肤
+  const [pendingPreset, setPendingPreset] = useState<'steve' | 'alex' | null>(null)
+  const [pendingVariant, setPendingVariant] = useState<'classic' | 'slim' | null>(null)
+  const currentPreset =
+    offlineSkin?.source === 'preset' ? (offlineSkin.sourceName.toLowerCase() as 'steve' | 'alex') : null
+  const shownPreset = pendingPreset ?? currentPreset
+  const shownVariant =
+    pendingVariant ?? ((offlineSkin?.variant as 'classic' | 'slim' | undefined) ?? 'classic')
+  const settingsDirty = pendingPreset !== null || pendingVariant !== null
+  const handleApplySettings = async () => {
+    if (!settingsDirty || busyKey) return
+    setBusyKey('apply-settings')
+    setError(null)
+    setMessage(null)
+    try {
+      if (pendingPreset && pendingPreset !== currentPreset) {
+        await ipc.applyOfflinePreset(account.id, pendingPreset)
+      }
+      if (pendingVariant) {
+        if (!offlineSkin && !pendingPreset) {
+          throw new Error('请先设置皮肤（预设 / 本地 / URL / 抓取），再应用模型')
+        }
+        if (offlineSkin?.variant !== pendingVariant) {
+          await ipc.setOfflineSkinVariant(account.id, pendingVariant)
+        }
+      }
+      setMessage('皮肤设定已应用')
+      setPendingPreset(null)
+      setPendingVariant(null)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusyKey(null)
+    }
   }
 
   // 上传 / URL 应用的模型选择（默认跟随当前皮肤）
@@ -164,12 +244,16 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
         <h1 className="text-lg font-semibold">{account.name}</h1>
         <span
           className={`rounded px-1.5 py-0.5 text-[10px] ${
-            isMicrosoft
+            isMicrosoft || isAuthlib
               ? 'bg-accent-soft text-accent'
               : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'
           }`}
         >
-          {isMicrosoft ? '微软正版' : '离线模式'}
+          {isMicrosoft
+            ? '微软正版'
+            : isAuthlib
+              ? `皮肤站${account.serverName ? ` · ${account.serverName}` : ''}`
+              : '离线模式'}
         </span>
       </div>
 
@@ -210,22 +294,33 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
                 model={activeSkin?.variant ?? 'classic'}
               />
             </div>
+          ) : isAuthlib && authlibSkin ? (
+            <div className="flex justify-center rounded-lg bg-gradient-to-b from-neutral-100 to-neutral-200 dark:from-neutral-800 dark:to-neutral-900">
+              <SkinCanvas
+                skinUrl={authlibSkin.dataUrl}
+                capeUrl={null}
+                showCape={false}
+                model={authlibSkin.model === 'slim' ? 'slim' : 'classic'}
+              />
+            </div>
           ) : !isMicrosoft && offlineSkinTex ? (
             <div className="flex justify-center rounded-lg bg-gradient-to-b from-neutral-100 to-neutral-200 dark:from-neutral-800 dark:to-neutral-900">
               <SkinCanvas
                 skinUrl={offlineSkinTex}
                 capeUrl={null}
                 showCape={false}
-                model={offlineSkin?.variant ?? 'classic'}
+                model={shownVariant}
               />
             </div>
           ) : (
             <div className="flex h-56 items-center justify-center rounded-lg bg-neutral-50 text-xs text-neutral-400 dark:bg-neutral-800/60 dark:text-neutral-500">
               {isMicrosoft
                 ? '暂无皮肤贴图'
-                : offlineSkin
-                  ? '皮肤贴图加载中…'
-                  : '尚未设置离线皮肤'}
+                : isAuthlib
+                  ? '皮肤站未设置皮肤或加载中'
+                  : offlineSkin
+                    ? '皮肤贴图加载中…'
+                    : '尚未设置离线皮肤'}
             </div>
           )}
           <p className="mt-2 text-center text-[10px] text-neutral-400 dark:text-neutral-500">
@@ -365,47 +460,46 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
                 )}
               </div>
             </>
+          ) : isAuthlib ? (
+            /* 皮肤站账户：皮肤/披风由站点托管，仅展示信息与跳转 */
+            <div className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+              <p className="text-sm font-medium">皮肤站账户</p>
+              <div className="mt-2 space-y-1.5 text-xs text-neutral-500 dark:text-neutral-400">
+                <p>
+                  站点：
+                  <span className="font-medium text-neutral-700 dark:text-neutral-200">
+                    {account.serverName ?? '未知站点'}
+                  </span>
+                </p>
+                {account.serverUrl && (
+                  <p className="break-all font-mono text-[10px]">{account.serverUrl}</p>
+                )}
+                <p>
+                  皮肤与披风由皮肤站托管，游戏内将自动使用站点上的外观；如需更换皮肤或披风，请前往站点官网操作。
+                </p>
+              </div>
+              {account.serverUrl && (
+                <button
+                  type="button"
+                  onClick={() => void ipc.openExternal(account.serverUrl!)}
+                  className={`${btnAccent} mt-3`}
+                >
+                  前往站点管理
+                </button>
+              )}
+            </div>
           ) : (
-            /* 离线账户：抓取正版玩家皮肤注入（批次 D） */
+            /* 离线账户：预设 / 本地文件 / URL / 玩家名抓取，多来源皮肤注入 */
             <div className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
               <p className="text-sm font-medium">离线皮肤</p>
-              {offlineSkin ? (
+              {offlineSkin && (
                 <div className="mt-2 flex items-center gap-2 rounded-lg bg-accent-soft/40 px-3 py-2 text-xs">
                   <span className="min-w-0 flex-1 truncate">
-                    当前皮肤来自「{offlineSkin.sourceName}」
+                    当前：{offlineSourceLabel(offlineSkin)}
                     <span className="ml-2 rounded bg-white px-1.5 py-0.5 text-[10px] text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
                       {offlineSkin.variant === 'slim' ? '纤细' : '粗壮'}
                     </span>
-                    <span className="ml-2 text-neutral-400">
-                      抓取于 {new Date(offlineSkin.fetchedAt * 1000).toLocaleString()}
-                    </span>
                   </span>
-                  <button
-                    type="button"
-                    disabled={busyKey !== null}
-                    onClick={() =>
-                      void act(
-                        'variant-offline',
-                        () =>
-                          ipc.setOfflineSkinVariant(
-                            account.id,
-                            offlineSkin.variant === 'slim' ? 'classic' : 'slim',
-                          ),
-                        offlineSkin.variant === 'slim' ? '已切换为粗壮模型' : '已切换为纤细模型',
-                      )
-                    }
-                    className={`mr-1 shrink-0 rounded-md px-2 py-1 text-xs transition-colors duration-150 disabled:opacity-50 ${
-                      busyKey === 'variant-offline'
-                        ? 'opacity-70'
-                        : 'text-accent hover:bg-white dark:hover:bg-neutral-700'
-                    }`}
-                  >
-                    {busyKey === 'variant-offline'
-                      ? '切换中…'
-                      : offlineSkin.variant === 'slim'
-                        ? '改用粗壮'
-                        : '改用纤细'}
-                  </button>
                   <button
                     type="button"
                     disabled={busyKey !== null}
@@ -415,15 +509,104 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
                     移除
                   </button>
                 </div>
-              ) : (
-                <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                  输入正版玩家名抓取其皮肤并注入到该离线账户（仅对你自己的客户端生效，进入游戏即可看到）
-                </p>
               )}
-              <div className="mt-3 flex items-center gap-2">
+
+              {/* 预设 + 模型：暂存选择，点「应用设定」统一提交 */}
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-10 shrink-0 text-xs text-neutral-500 dark:text-neutral-400">预设</span>
+                  <div className="flex flex-1 gap-2">
+                    {(['steve', 'alex'] as const).map((preset) => {
+                      const active = shownPreset === preset
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          disabled={busyKey !== null}
+                          onClick={() => setPendingPreset(pendingPreset === preset ? null : preset)}
+                          className={`flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors duration-150 disabled:opacity-50 ${
+                            active
+                              ? 'border-accent/60 bg-accent-soft text-accent'
+                              : 'border-neutral-200 text-neutral-600 hover:border-accent/40 dark:border-neutral-700 dark:text-neutral-300'
+                          }`}
+                        >
+                          {preset === 'steve' ? 'Steve' : 'Alex'}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-10 shrink-0 text-xs text-neutral-500 dark:text-neutral-400">模型</span>
+                  <div className="flex flex-1 gap-2">
+                    {(['classic', 'slim'] as const).map((v) => {
+                      const active = shownVariant === v
+                      return (
+                        <button
+                          key={v}
+                          type="button"
+                          disabled={busyKey !== null}
+                          onClick={() => setPendingVariant(pendingVariant === v ? null : v)}
+                          className={`flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors duration-150 disabled:opacity-50 ${
+                            active
+                              ? 'border-accent/60 bg-accent-soft text-accent'
+                              : 'border-neutral-200 text-neutral-600 hover:border-accent/40 dark:border-neutral-700 dark:text-neutral-300'
+                          }`}
+                        >
+                          {v === 'classic' ? '粗壮' : '纤细'}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!settingsDirty || busyKey !== null}
+                    onClick={() => void handleApplySettings()}
+                    className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors duration-150 disabled:opacity-50 ${
+                      settingsDirty
+                        ? 'bg-accent text-white hover:bg-accent-hover'
+                        : 'bg-neutral-100 text-neutral-400 dark:bg-neutral-800'
+                    }`}
+                  >
+                    {busyKey === 'apply-settings' ? '应用中…' : '应用设定'}
+                  </button>
+                </div>
+              </div>
+
+              {/* 本地文件 / URL */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busyKey !== null}
+                  onClick={() => void handleOfflineFile()}
+                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-accent-hover disabled:opacity-50"
+                >
+                  {busyKey === 'offline-file' ? '处理中…' : '上传本地皮肤'}
+                </button>
                 <input
                   className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-transparent px-2.5 py-1.5 text-xs outline-none transition-colors duration-150 focus:border-accent dark:border-neutral-700"
-                  placeholder="正版玩家名（如 Notch）"
+                  placeholder="皮肤图片 URL（http/https，64x64 或 64x32 PNG）"
+                  value={offlineUrlInput}
+                  onChange={(e) => setOfflineUrlInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleOfflineUrl()
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleOfflineUrl()}
+                  disabled={busyKey !== null || !offlineUrlInput.trim()}
+                  className="rounded-lg bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600 transition-colors duration-150 hover:bg-neutral-200 disabled:opacity-50 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700"
+                >
+                  {busyKey === 'offline-url' ? '下载中…' : '从 URL 应用'}
+                </button>
+              </div>
+
+              {/* 正版玩家名抓取（保留） */}
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  className="min-w-0 flex-1 rounded-lg border border-neutral-200 bg-transparent px-2.5 py-1.5 text-xs outline-none transition-colors duration-150 focus:border-accent dark:border-neutral-700"
+                  placeholder="或输入正版玩家名抓取其皮肤（如 Notch）"
                   value={playerNameInput}
                   onChange={(e) => setPlayerNameInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -435,13 +618,13 @@ export function AccountDetailView({ account, onBack }: { account: AccountView; o
                   type="button"
                   onClick={() => void handleFetchOfflineSkin()}
                   disabled={busyKey !== null || !playerNameInput.trim()}
-                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-accent-hover disabled:opacity-50"
+                  className="rounded-lg bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600 transition-colors duration-150 hover:bg-neutral-200 disabled:opacity-50 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700"
                 >
                   {busyKey === 'fetch-offline' ? '抓取中…' : '抓取并应用'}
                 </button>
               </div>
               <p className="mt-2 text-[10px] text-neutral-400 dark:text-neutral-500">
-                启动该账户的游戏时自动注入（首次启动需联网下载注入组件）
+                皮肤仅对你自己的客户端生效，启动该账户的游戏时自动注入（首次启动需联网下载注入组件）；不设置时游戏按 UUID 默认随机 Steve/Alex
               </p>
             </div>
           )}

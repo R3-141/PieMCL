@@ -76,6 +76,7 @@ export function InstanceDetailPanel({
   const [name, setName] = useState('')
   const [minMemoryMb, setMinMemoryMb] = useState(0)
   const [maxMemoryMb, setMaxMemoryMb] = useState(4096)
+  const [autoMemory, setAutoMemory] = useState(false)
   const [preset, setPreset] = useState('default')
   const [fullscreen, setFullscreen] = useState(false)
   const [javaPath, setJavaPath] = useState<string | null>(null)
@@ -107,6 +108,7 @@ export function InstanceDetailPanel({
         setName(d.name)
         setMinMemoryMb(d.jvm.minMemoryMb)
         setMaxMemoryMb(d.jvm.maxMemoryMb)
+        setAutoMemory(d.jvm.autoMemory)
         setPreset(d.jvm.preset)
         setFullscreen(d.jvm.fullscreen)
         setJavaPath(d.javaPath)
@@ -166,6 +168,7 @@ export function InstanceDetailPanel({
       if (name.trim() !== detail.name) patch.name = name.trim()
       if (minMemoryMb !== detail.jvm.minMemoryMb) patch.minMemoryMb = minMemoryMb
       if (maxMemoryMb !== detail.jvm.maxMemoryMb) patch.maxMemoryMb = maxMemoryMb
+      if (autoMemory !== detail.jvm.autoMemory) patch.autoMemory = autoMemory
       if (preset !== detail.jvm.preset) patch.preset = preset
       if (fullscreen !== detail.jvm.fullscreen) patch.fullscreen = fullscreen
       if (extraArgs !== detail.jvm.extraArgs) patch.extraArgs = extraArgs
@@ -189,6 +192,7 @@ export function InstanceDetailPanel({
         setExtraArgs(d2.jvm.extraArgs)
         setMinMemoryMb(d2.jvm.minMemoryMb)
         setMaxMemoryMb(d2.jvm.maxMemoryMb)
+        setAutoMemory(d2.jvm.autoMemory)
         setPreset(d2.jvm.preset)
         setFullscreen(d2.jvm.fullscreen)
         setWidthInput(d2.jvm.windowWidth?.toString() ?? '')
@@ -421,33 +425,53 @@ export function InstanceDetailPanel({
             </div>
 
             <div>
-              <label className={labelCls} htmlFor="ei-mem">
-                可分配内存：<span className="text-accent">{memoryGb} GB</span>
-              </label>
-              <input
-                id="ei-mem"
-                type="range"
-                min={1024}
-                max={32768}
-                step={512}
-                value={maxMemoryMb}
-                onChange={(e) => {
-                  const v = Number(e.target.value)
-                  setMaxMemoryMb(v)
-                  // 主流启动器语义：初始内存跟随最大内存（-Xms = -Xmx，启动即到位）
-                  setMinMemoryMb(v)
-                }}
-                disabled={saving}
-                className="w-full accent-[var(--accent)]"
-              />
-              <div className="flex justify-between text-xs text-neutral-400">
-                <span>1 GB</span>
-                <span>32 GB</span>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className={labelCls + ' mb-0'} htmlFor="ei-mem">
+                  可分配内存：<span className="text-accent">{memoryGb} GB</span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={autoMemory}
+                    onChange={(e) => setAutoMemory(e.target.checked)}
+                    disabled={saving}
+                    className="size-4 accent-[var(--accent)]"
+                  />
+                  自动分配内存
+                </label>
               </div>
-              {overPhysical && (
-                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                  可分配内存较大：建议不超过物理内存的 80%，否则游戏可能因内存不足崩溃
+              {autoMemory ? (
+                <p className="text-xs text-neutral-400 dark:text-neutral-500">
+                  已开启自动分配：启动时按物理内存自动计算（约一半，介于 2–16 GB 之间），手动滑条设置将被忽略
                 </p>
+              ) : (
+                <>
+                  <input
+                    id="ei-mem"
+                    type="range"
+                    min={1024}
+                    max={32768}
+                    step={512}
+                    value={maxMemoryMb}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      setMaxMemoryMb(v)
+                      // 主流启动器语义：初始内存跟随最大内存（-Xms = -Xmx，启动即到位）
+                      setMinMemoryMb(v)
+                    }}
+                    disabled={saving}
+                    className="w-full accent-[var(--accent)]"
+                  />
+                  <div className="flex justify-between text-xs text-neutral-400">
+                    <span>1 GB</span>
+                    <span>32 GB</span>
+                  </div>
+                  {overPhysical && (
+                    <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                      可分配内存较大：建议不超过物理内存的 80%，否则游戏可能因内存不足崩溃
+                    </p>
+                  )}
+                </>
               )}
             </div>
 

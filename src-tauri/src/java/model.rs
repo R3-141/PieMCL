@@ -17,6 +17,10 @@ pub struct JavaInfo {
     pub arch: String,
     /// 发行版（java.vendor，如 Temurin / Oracle Corporation / Microsoft）
     pub vendor: String,
+    /// 是否为用户手动登记的路径（settings.json customJavaPaths 命中；
+    /// 手动条目在 Java 管理页可移除登记）
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// 实例的 Java 满足状态

@@ -66,6 +66,30 @@ pub async fn add_custom_java(
     Ok(info)
 }
 
+/// 移除手动登记的 Java 路径：仅取消登记（该路径不再纳入检测），不删除文件本身。
+/// 路径大小写不敏感匹配；前端移除后自行触发重新检测。
+#[tauri::command]
+pub async fn remove_custom_java(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let p = path.trim().to_string();
+    if p.is_empty() {
+        return Err("路径不能为空".into());
+    }
+    let mut settings = state.settings.read().await.clone();
+    let before = settings.custom_java_paths.len();
+    settings
+        .custom_java_paths
+        .retain(|x| !x.eq_ignore_ascii_case(&p));
+    if settings.custom_java_paths.len() == before {
+        return Err("该路径不在手动登记列表中".into());
+    }
+    settings.validate().map_err(String::from)?;
+    settings.save(&state.paths).await?;
+    Ok(())
+}
+
 /// 检测系统 Java 与各实例满足状态
 #[tauri::command]
 pub async fn detect_java(state: State<'_, AppState>) -> Result<DetectJavaResult, String> {
@@ -108,8 +132,10 @@ pub async fn detect_java(state: State<'_, AppState>) -> Result<DetectJavaResult,
 
 /// 下载 + 解压指定主版本的 Temurin JRE 到 {root}/java/{major}/（共享实现）。
 ///
-/// 阻塞等待下载与解压全部完成，成功返回 (task_id, java.exe 路径)。
+/// 阻塞等待下载与解压全部完成，成功返回 (task_id, 验证通过的 JavaInfo)。
 /// 进度经 download-progress 事件推送（kind="java"），解压完成发 java-installed。
+/// 探测验证不通过即安装失败（报错携带 java 的实际输出/超时诊断）；
+/// 启动流程缺 Java 时自动补装复用同一函数，直接采信返回的 JavaInfo。
 /// 同主版本任务互斥（键 java:{major}）。
 pub(crate) async fn install_java<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -118,7 +144,31 @@ pub(crate) async fn install_java<R: tauri::Runtime>(
     retry_defs: super::RetryMap,
     paths: &LauncherPaths,
     major_version: u32,
-) -> Result<(String, String), String> {
+) -> Result<(String, crate::java::model::JavaInfo), String> {
+    // 已安装短路：{root}/java/{major}/ 下已有可用运行时则直接返回，
+    // 不查 API、不下载、不解压（修复"每次启动重复安装"）。
+    // 含重试：运行时已存在时首次执行可能被杀软扫描拖慢；重试 4 次
+    // （每次 10s 超时 + 1s 间隔 ≈ 44s 容忍窗口），避免误判后白白重下整个 JRE
+    let cache_dir = paths.java_dir().join(major_version.to_string());
+    {
+        let dir = cache_dir.clone();
+        let existing =
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::java::detect::probe_java_cache_dir_with_retry(&dir, 4)
+            })
+            .await
+            .map_err(|e| format!("探测任务执行失败：{e}"))?;
+        if let Some(info) = existing {
+            if info.version >= major_version {
+                return Ok((format!("java-{major_version}-existing"), info));
+            }
+            eprintln!(
+                "[java] 目录 java/{major_version} 中的运行时主版本不符（{}），重新安装",
+                info.version
+            );
+        }
+    }
+
     // 查询 Adoptium 最新 JRE 资产
     let http = crate::core::net::apply_proxy(reqwest::Client::builder()
         .user_agent("PieMCL/0.1")
@@ -209,11 +259,35 @@ pub(crate) async fn install_java<R: tauri::Runtime>(
         }
     };
 
+    // 解压后定向验证探测（顺序、无并行干扰，重试 5 次）：新解压的运行时首次执行
+    // 可能被系统文件扫描或磁盘繁忙拖慢，重试直到跑通；最终不通过 = 安装失败，
+    // 报错携带诊断信息（超时 / 退出码 / stderr 尾部），不再静默吞掉
+    let jp = java_path.clone();
+    let verified = tauri::async_runtime::spawn_blocking(move || {
+        crate::java::detect::probe_java_path_with_retry_detailed(std::path::Path::new(&jp), 5)
+    })
+    .await
+    .map_err(|e| format!("验证任务执行失败：{e}"))?;
+    let info = match verified {
+        Ok(info) => {
+            eprintln!("[java] 安装验证通过：{}（Java {}）", info.path, info.version);
+            info
+        }
+        Err(d) => {
+            let msg = format!("Java {major_version} 已下载解压，但运行时验证失败：{d}");
+            let _ = app.emit(
+                "java-install-failed",
+                serde_json::json!({ "major": major_version, "error": msg }),
+            );
+            return Err(msg);
+        }
+    };
+
     let _ = app.emit(
         "java-installed",
-        serde_json::json!({ "major": major_version, "path": java_path }),
+        serde_json::json!({ "major": major_version, "path": info.path }),
     );
-    Ok((task_id, java_path))
+    Ok((task_id, info))
 }
 
 /// 从 Adoptium 下载指定主版本的 Temurin JRE 并解压到 {root}/java/{major}/

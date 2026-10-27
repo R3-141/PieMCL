@@ -1,29 +1,16 @@
 # Logs
 logs
 *.log
-hs_err_pid*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Dependencies & build output
 node_modules
 dist
 dist-ssr
 *.local
-*.tsbuildinfo
-
-# Runtime data created by the launcher itself (portable layout)
-.minecraft
-PieMCL
-
-# Local probe / scratch files
-api-probe.json
-frpc-probe.bin
-t[0-9]*.json
-chk-out.txt
 
 # Editor directories and files
 .vscode/*

@@ -26,6 +26,7 @@ import { LanView } from '../../views/lan/LanView'
 import { Sidebar } from './Sidebar'
 import { TopBar } from './TopBar'
 import { DownloadPanel } from './DownloadPanel'
+import { UpdatePromptModal } from '../common/UpdatePromptModal'
 
 const VIEWS: Record<ViewId, () => React.JSX.Element> = {
   home: HomeView,
@@ -106,7 +107,11 @@ export function AppShell() {
     onLaunchLog((p) => useLaunchStore.getState().appendLog(p.instanceId, p.stream, p.line)).then(
       (u) => offs.push(u),
     )
-    onLaunchExited((p) => useLaunchStore.getState().applyExit(p.instanceId, p.code, p.summary)).then(
+    onLaunchExited((p) => {
+      useLaunchStore.getState().applyExit(p.instanceId, p.code, p.summary)
+      // 游戏退出后返回主页（退出摘要保留在日志页，用户可自行前往查看）
+      useUiStore.getState().setCurrentView('home')
+    }).then(
       (u) => offs.push(u),
     )
     return () => offs.forEach((u) => u())
@@ -378,6 +383,8 @@ export function AppShell() {
         </main>
       </div>
       <DownloadPanel />
+      {/* 更新提示弹窗（启动 8 秒后静默检查，命中新版本且未被跳过/关闭时弹出） */}
+      <UpdatePromptModal />
       {/* 拖放覆盖层：skin 模式 = 皮肤上传弹窗；资源管理 = 当前 Tab 类型；实例页 = 整合包 */}
       {dragActive && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[fade-in_120ms_ease-out] items-center justify-center bg-accent/10 backdrop-blur-sm">

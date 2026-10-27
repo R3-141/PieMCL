@@ -34,6 +34,11 @@ struct LocalSkin {
     png: Vec<u8>,
     /// http://127.0.0.1:{port}（textures url 前缀）
     base_url: String,
+    /// 皮肤版本号（= offline_skin.fetchedAt）：拼进纹理 URL 作缓存击穿参数。
+    /// MC 客户端把下载过的皮肤持久缓存在 {game_dir}/assets/skins/（按 URL 哈希
+    /// 命中），皮肤换过但 URL 不变时游戏会一直用旧缓存——版本号一变 URL 即变，
+    /// 强制重新下载
+    skin_version: String,
 }
 
 /// 本地服务句柄（shutdown 即关闭）
@@ -56,20 +61,28 @@ pub async fn start(
     player_name: String,
     variant: String,
     png: Vec<u8>,
+    skin_version: String,
 ) -> Result<LocalYggHandle, String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("本地皮肤服务绑定端口失败：{e}"))?;
     let port = listener
         .local_addr()
-        .map_err(|e| format!("获取本地端口失败：{e}"))?
+        .map_err(|e| e.to_string())?
         .port();
+    // 每次启动附加随机 nonce：纹理 URL 每次启动都不同，强制客户端
+    // 丢弃一切 URL 键缓存，无条件重新拉取当前本地皮肤贴图
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let state = Arc::new(LocalSkin {
         uuid_nodash,
         player_name,
         variant,
         png,
         base_url: format!("http://127.0.0.1:{port}"),
+        skin_version: format!("{skin_version}-{nonce}"),
     });
     eprintln!(
         "[local-ygg] 皮肤服务已启动：127.0.0.1:{port}（{} · {}）",
@@ -118,10 +131,12 @@ async fn profile(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut skin_entry = json!({
-        "url": format!("{}/textures/skin", state.base_url),
+        "url": format!("{}/textures/skin?v={}", state.base_url, state.skin_version),
     });
-    // 纤细模型经 SKIN.meta.model 声明（缺省 classic）
+    // 纤细模型声明（缺省 classic）：原版 authlib 解析 SKIN.metadata.model
+    // （Mojang 官方格式）；authlib-injector 规范称 SKIN.meta——两键同写双端兼容
     if state.variant == "slim" {
+        skin_entry["metadata"] = json!({ "model": "slim" });
         skin_entry["meta"] = json!({ "model": "slim" });
     }
     let textures = json!({
@@ -148,10 +163,17 @@ async fn profile(
 async fn texture(
     State(state): State<Arc<LocalSkin>>,
     AxumPath(_name): AxumPath<String>,
-) -> (StatusCode, [(axum::http::header::HeaderName, String); 1], Vec<u8>) {
+) -> (StatusCode, [(axum::http::header::HeaderName, String); 2], Vec<u8>) {
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "image/png".to_string())],
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png".to_string()),
+            // 禁止任何环节缓存：皮肤版本号在 URL 里，但 HTTP 层兜底
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-store, no-cache, must-revalidate".to_string(),
+            ),
+        ],
         state.png.clone(),
     )
 }

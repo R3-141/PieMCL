@@ -8,6 +8,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   AccountListResult,
   AccountView,
+  AuthlibLoginResult,
+  AuthlibServerMeta,
+  AuthlibSkinData,
   AppSettings,
   CreateProgress,
   DetectJavaResult,
@@ -35,6 +38,8 @@ import type {
   McVersionEntry,
   ModInfo,
   MsLoginStatePayload,
+  AuthlibOauthStatePayload,
+  UpdateCheckResult,
   OnlineVersion,
   OptiFineEntry,
   PackImportProgress,
@@ -115,6 +120,9 @@ export const ipc = {
 
   /** 手动登记 Java 路径（java.exe 或其所在目录），探测成功后持久化并返回识别信息 */
   addCustomJava: (path: string) => invoke<JavaInfo>('add_custom_java', { path }),
+
+  /** 移除手动登记的 Java 路径（仅取消登记，不删除文件；调用后需重新检测） */
+  removeCustomJava: (path: string) => invoke<void>('remove_custom_java', { path }),
 
   /** 读取游戏配置模板（启动器全局；文件缺失返回空模板） */
   loadGameConfig: () => invoke<GameConfigTemplate>('load_game_config'),
@@ -254,6 +262,12 @@ export const ipc = {
   getDataDir: () => invoke<string>('get_data_dir'),
   openDataDir: () => invoke<void>('open_data_dir'),
   openExternal: (url: string) => invoke<void>('open_external', { url }),
+
+  /** 在文件管理器中定位文件 / 目录（Java 管理等页面用） */
+  revealPath: (path: string) => invoke<void>('reveal_path', { path }),
+
+  /** 检查更新（force=true 为设置页手动检查，忽略跳过版本与启动开关） */
+  checkUpdate: (force: boolean) => invoke<UpdateCheckResult>('check_update', { force }),
   /** 清空市场图标缓存，返回删除的文件数 */
   clearMarketCache: () => invoke<number>('clear_market_cache'),
 
@@ -321,6 +335,29 @@ export const ipc = {
   /** 取消当前微软登录流程 */
   cancelMicrosoftLogin: () => invoke<void>('cancel_microsoft_login'),
 
+  /** 预览皮肤站元数据（登录弹窗第一步：确认站点） */
+  fetchAuthlibServerMeta: (serverUrl: string) =>
+    invoke<AuthlibServerMeta>('fetch_authlib_server_meta', { serverUrl }),
+
+  /** 皮肤站账密登录（多角色时 account 为 null，需 confirmAuthlibProfile 绑定角色） */
+  loginAuthlib: (serverUrl: string, username: string, password: string) =>
+    invoke<AuthlibLoginResult>('login_authlib', { serverUrl, username, password }),
+
+  /** 多角色账号登录后绑定所选角色 */
+  confirmAuthlibProfile: (profileId: string) =>
+    invoke<AccountView>('confirm_authlib_profile', { profileId }),
+
+  /** 拉取皮肤站角色当前皮肤（3D 预览用；未设置皮肤返回 null） */
+  getAuthlibSkinData: (accountId: string) =>
+    invoke<AuthlibSkinData | null>('get_authlib_skin_data', { accountId }),
+
+  /** 发起 LittleSkin OAuth 设备码登录（立即返回，状态经 authlib-oauth-state 事件推送） */
+  loginLittleskinOauth: (serverUrl: string) =>
+    invoke<void>('login_littleskin_oauth', { serverUrl }),
+
+  /** 取消当前 LittleSkin OAuth 登录流程 */
+  cancelLittleskinOauth: () => invoke<void>('cancel_littleskin_oauth'),
+
   /** 弹出文件对话框选择皮肤 PNG（取消返回 null） */
   pickSkinImage: () => invoke<string | null>('pick_skin_image'),
 
@@ -357,6 +394,18 @@ export const ipc = {
   /** 切换离线皮肤模型（variant：slim / classic；贴图不变） */
   setOfflineSkinVariant: (accountId: string, variant: string) =>
     invoke<void>('set_offline_skin_variant', { accountId, variant }),
+
+  /** 应用内置预设皮肤（preset：steve / alex；模型随预设固定） */
+  applyOfflinePreset: (accountId: string, preset: string) =>
+    invoke<void>('apply_offline_preset', { accountId, preset }),
+
+  /** 应用 URL 皮肤（仅 http/https；模型沿用当前设置） */
+  applyOfflineSkinUrl: (accountId: string, url: string) =>
+    invoke<void>('apply_offline_skin_url', { accountId, url }),
+
+  /** 应用本地皮肤文件：path 为空时弹文件选择框（png） */
+  applyOfflineSkinFile: (accountId: string, path?: string) =>
+    invoke<void>('apply_offline_skin_file', { accountId, path: path ?? null }),
 
   /** 读取离线账户皮肤 PNG 的 data URL（3D 预览用；无皮肤返回 null） */
   getOfflineSkinDataUrl: (accountId: string) =>
@@ -535,6 +584,13 @@ export function onAccountsChanged(cb: () => void): Promise<UnlistenFn> {
 /** 监听微软登录流程状态（设备码展示 / 认证中 / 成功 / 过期 / 拒绝 / 失败） */
 export function onMsLoginState(cb: (p: MsLoginStatePayload) => void): Promise<UnlistenFn> {
   return listen<MsLoginStatePayload>('ms-login-state', (e) => cb(e.payload))
+}
+
+/** 监听 LittleSkin OAuth 设备码登录流程状态 */
+export function onAuthlibOauthState(
+  cb: (p: AuthlibOauthStatePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<AuthlibOauthStatePayload>('authlib-oauth-state', (e) => cb(e.payload))
 }
 
 /** 监听整合包导入进度 */

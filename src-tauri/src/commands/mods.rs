@@ -769,7 +769,7 @@ pub(crate) async fn confirm_install_core(
     for s in &specs {
         let mut req = DownloadRequest::new(
             s.file.filename.clone(),
-            crate::download::mirror::mcimirror_candidates(std::slice::from_ref(&s.file.url)),
+            crate::download::mirror::market_candidates(std::slice::from_ref(&s.file.url)),
             target_dir.join(&s.file.filename),
         );
         if let Some(sha) = &s.file.sha1 {
@@ -1227,7 +1227,7 @@ pub async fn fetch_icon(state: State<'_, AppState>, url: String) -> Result<Strin
                 .build()
                 .map_err(|e| format!("构建 HTTP 客户端失败：{e}"))?;
             let candidates =
-                crate::download::mirror::official_first_candidates(std::slice::from_ref(&url));
+                crate::download::mirror::market_candidates(std::slice::from_ref(&url));
             let mut data: Option<Vec<u8>> = None;
             let mut last_err: Option<String> = None;
             // 两轮尝试（官方 → 镜像 → 官方 → 镜像）：本机到官方 CDN 的连接

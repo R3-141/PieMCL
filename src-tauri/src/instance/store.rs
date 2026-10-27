@@ -128,6 +128,10 @@ impl InstanceStore {
     pub async fn list(&self) -> AppResult<Vec<InstanceSummary>> {
         // 开箱即用：自动识别其他启动器留下的版本文件夹（失败标记短路，开销可忽略）
         let _ = super::foreign::scan_and_import(&self.paths).await;
+        // 外部改动自愈：文件夹被手动改名时回写元数据与内部文件命名
+        let _ = super::foreign::reconcile_renamed_instances(&self.paths).await;
+        // 修复历史导入的 mc_version 误记（整合包名被当成 MC 版本，市场请求非法）
+        let _ = super::foreign::repair_mc_versions(&self.paths).await;
         let mut out = Vec::new();
         let mut entries = match tokio::fs::read_dir(self.paths.versions_root()).await {
             Ok(e) => e,
@@ -313,6 +317,9 @@ impl InstanceStore {
                 return Err(AppError::msg("最大内存需在 1024–32768 MB 之间"));
             }
             meta.jvm.max_memory_mb = max;
+        }
+        if let Some(auto) = patch.auto_memory {
+            meta.jvm.auto_memory = auto;
         }
         if let Some(args) = patch.extra_args {
             meta.jvm.extra_args = args;

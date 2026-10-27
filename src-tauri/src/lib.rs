@@ -88,6 +88,8 @@ pub fn run() {
             tauri::async_runtime::block_on(paths.ensure_dirs())?;
             // 加载全局设置并按其并发上限创建下载引擎
             let settings = tauri::async_runtime::block_on(AppSettings::load(&paths));
+            // 同步模组市场源运行时镜像（modrinth / curseforge / mirror 模块读取）
+            crate::core::settings::sync_market_sources(&settings);
             // 初始化全局网络代理配置（各 HTTP 客户端构造时读取）
             crate::core::net::init_proxy(crate::core::net::ProxyConfig {
                 mode: settings.proxy_mode.clone(),
@@ -149,7 +151,9 @@ pub fn run() {
             commands::java::detect_java,
             commands::java::download_java,
             commands::java::add_custom_java,
+            commands::java::remove_custom_java,
             commands::window::set_window_blur,
+            commands::settings::reveal_path,
             commands::launch::launch_instance,
             commands::launch::kill_instance,
             commands::launch::list_running,
@@ -159,6 +163,13 @@ pub fn run() {
             commands::account::remove_account,
             commands::account::login_microsoft,
             commands::account::cancel_microsoft_login,
+            commands::account::fetch_authlib_server_meta,
+            commands::account::login_authlib,
+            commands::account::confirm_authlib_profile,
+            commands::account::get_authlib_skin_data,
+            commands::account::login_littleskin_oauth,
+            commands::account::cancel_littleskin_oauth,
+            commands::settings::check_update,
             commands::account::pick_skin_image,
             commands::account::apply_library_skin,
             commands::account::switch_skin_variant,
@@ -169,6 +180,9 @@ pub fn run() {
             commands::account::fetch_and_apply_offline_skin,
             commands::account::remove_offline_skin,
             commands::account::set_offline_skin_variant,
+            commands::account::apply_offline_preset,
+            commands::account::apply_offline_skin_url,
+            commands::account::apply_offline_skin_file,
             commands::account::get_offline_skin_data_url,
             commands::mods::list_mods,
             commands::mods::toggle_mod,

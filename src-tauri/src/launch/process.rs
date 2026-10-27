@@ -39,6 +39,110 @@ pub fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// 该 PID 的进程树（自身或后代）是否已拥有可见的顶层窗口
+/// （「游戏窗口已出现」的判定依据）。
+///
+/// 必须匹配整棵树而非精确 PID：通过 Oracle javapath 等转发 shim 启动时，
+/// spawn 到的是 stub 进程，游戏窗口由其**子进程**（真实 JVM）创建。
+/// Windows：EnumWindows 收集可见窗口 owner → Toolhelp 快照建 PID→父PID 映射
+/// → 回溯 owner 祖先链判断是否命中；非 Windows：恒为 true（退回旧语义）
+pub fn pid_has_visible_window(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let owners = visible_window_owners();
+        if owners.is_empty() {
+            return false;
+        }
+        let parents = process_parent_map();
+        owners
+            .iter()
+            .any(|&owner| is_in_process_tree(owner, pid, &parents))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// 枚举所有可见顶层窗口的 owner PID
+#[cfg(windows)]
+fn visible_window_owners() -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    struct Ctx {
+        owners: Vec<u32>,
+    }
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let ctx = unsafe { &mut *(lparam as *mut Ctx) };
+        if unsafe { IsWindowVisible(hwnd) } != 0 {
+            let mut owner: u32 = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
+            if owner != 0 {
+                ctx.owners.push(owner);
+            }
+        }
+        1 // 继续枚举
+    }
+
+    let mut ctx = Ctx { owners: Vec::new() };
+    unsafe {
+        EnumWindows(Some(enum_cb), &mut ctx as *mut Ctx as LPARAM);
+    }
+    ctx.owners
+}
+
+/// Toolhelp 快照：PID → 父 PID
+#[cfg(windows)]
+fn process_parent_map() -> std::collections::HashMap<u32, u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut map = std::collections::HashMap::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap != INVALID_HANDLE_VALUE {
+            let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+            if Process32First(snap, &mut entry) != 0 {
+                loop {
+                    map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                    if Process32Next(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            windows_sys::Win32::Foundation::CloseHandle(snap);
+        }
+    }
+    map
+}
+
+/// owner 是否属于 root 的进程树（自身或任意深度后代；上限 32 层防环）
+#[cfg(windows)]
+fn is_in_process_tree(
+    owner: u32,
+    root: u32,
+    parents: &std::collections::HashMap<u32, u32>,
+) -> bool {
+    let mut cur = owner;
+    for _ in 0..32 {
+        if cur == root {
+            return true;
+        }
+        match parents.get(&cur) {
+            Some(&p) if p != 0 && p != cur => cur = p,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// 启动游戏进程并接管其输出。
 ///
 /// - `on_log(stream, line)`：每收到一行回调一次（前端实时日志）
@@ -184,4 +288,40 @@ pub fn process_memory(pid: u32) -> Option<u64> {
     let pid = Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     sys.process(pid).map(|p| p.memory())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_window_detection() {
+        // explorer.exe 恒持有可见顶层窗口（桌面/任务栏）
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "(Get-Process explorer)[0].Id"])
+            .output()
+            .unwrap();
+        let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert!(pid_has_visible_window(pid), "explorer（PID {pid}）应有可见窗口");
+        // 不存在的 PID 应判定为无窗口
+        assert!(!pid_has_visible_window(0x7FFF_FFFF));
+    }
+
+    #[test]
+    fn spawned_child_window_detected() {
+        // 模拟游戏进程：spawn 子进程并让其创建可见窗口（MessageBox 阻塞直到被点掉）
+        let mut child = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName PresentationFramework; [void][System.Windows.MessageBox]::Show('x')",
+            ])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(4000));
+        let ok = pid_has_visible_window(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ok, "spawn 出的子进程窗口应被检测到");
+    }
 }

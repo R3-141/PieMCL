@@ -28,8 +28,34 @@ pub async fn save_settings(
         mode: s.proxy_mode.clone(),
         url: s.proxy_url.clone(),
     });
+    // 同步模组市场源运行时镜像（modrinth / curseforge / mirror 模块读取）
+    crate::core::settings::sync_market_sources(&s);
     *state.settings.write().await = s.clone();
     Ok(s)
+}
+
+/// 检查更新：查询 GitHub Releases 最新正式版并与当前版本比较。
+/// force=true 为设置页手动检查（忽略跳过版本与启动开关）；否则为启动静默检查
+/// ——未启用启动检查或最新版已被用户跳过时，返回 has_update=false 形态（不弹窗）。
+#[tauri::command]
+pub async fn check_update(
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<crate::core::update::UpdateCheckResult, String> {
+    let result = crate::core::update::check_update().await.map_err(String::from)?;
+    if !force {
+        let (enabled, skipped) = {
+            let s = state.settings.read().await;
+            (s.update_check_enabled, s.update_skipped_version.clone())
+        };
+        if !enabled || result.latest_version == skipped {
+            return Ok(crate::core::update::UpdateCheckResult {
+                has_update: false,
+                ..result
+            });
+        }
+    }
+    Ok(result)
 }
 
 /// 当前数据目录（实例、Java、皮肤、账户与设置所在根目录）
@@ -42,6 +68,20 @@ pub fn get_data_dir(state: State<'_, AppState>) -> String {
 #[tauri::command]
 pub fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
     opener::open(state.paths.root()).map_err(|e| format!("打开文件夹失败：{e}"))
+}
+
+/// 在系统文件管理器中定位任意已存在的文件 / 目录（Java 管理等页面用）
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(path.trim());
+    if !p.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    if p.is_dir() {
+        opener::open(p).map_err(|e| format!("打开目录失败：{e}"))
+    } else {
+        opener::reveal(p).map_err(|e| format!("打开位置失败：{e}"))
+    }
 }
 
 /// 用系统默认程序打开外部链接（「关于」页的仓库 / 主页 / 邮箱）。
@@ -139,6 +179,7 @@ pub async fn save_background_image(
     s.background_image = format!("bg.{ext}");
     s.validate()?;
     s.save(&state.paths).await?;
+    crate::core::settings::sync_market_sources(&s);
     *state.settings.write().await = s.clone();
     Ok(s)
 }
@@ -179,6 +220,7 @@ pub async fn remove_background_image(state: State<'_, AppState>) -> Result<AppSe
     s.background_image.clear();
     s.validate()?;
     s.save(&state.paths).await?;
+    crate::core::settings::sync_market_sources(&s);
     *state.settings.write().await = s.clone();
     Ok(s)
 }

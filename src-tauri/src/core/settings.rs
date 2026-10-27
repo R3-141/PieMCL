@@ -4,6 +4,8 @@
 // 镜像源策略：列表按序尝试（Mojang 域名改写为镜像域名），官方源恒为最后回退；
 // 文件缺失或损坏时静默回落默认值（设置损坏不应阻塞启动）。
 
+use std::sync::RwLock;
+
 use serde::{Deserialize, Serialize};
 
 use super::paths::LauncherPaths;
@@ -45,6 +47,18 @@ pub struct AppSettings {
     /// detect_all 时并入候选并探测）
     #[serde(default)]
     pub custom_java_paths: Vec<String>,
+    /// 启动实例后隐藏启动器窗口，全部游戏退出后恢复显示（默认开启）
+    pub hide_on_launch: bool,
+    /// 模组市场列表加载源：official（Modrinth 官方，默认）/ mirror（MCImirror）。
+    /// 仅决定优先顺序，另一源始终作为兜底（首选不可用时自动切换）
+    pub market_list_source: String,
+    /// 模组市场下载源：mirror（MCImirror，默认）/ official（Modrinth 官方）。
+    /// 作用于模组/整合包文件与市场图片下载；另一源始终兜底
+    pub market_download_source: String,
+    /// 启动时检查更新（默认开启；关闭后仅设置页手动检查可用）
+    pub update_check_enabled: bool,
+    /// 用户选择跳过的更新版本号（如 "26.10.27"）；启动检查命中时不再弹窗
+    pub update_skipped_version: String,
 }
 
 fn default_player_name() -> String {
@@ -61,6 +75,48 @@ fn default_download_source() -> String {
 
 fn default_proxy_mode() -> String {
     "none".to_string()
+}
+
+fn default_market_list_source() -> String {
+    "official".to_string()
+}
+
+fn default_market_download_source() -> String {
+    "mirror".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// 模组市场源运行时镜像：settings 加载 / 保存时同步，modrinth / curseforge /
+// download::mirror 模块据此决定候选源顺序（深拷贝快照，锁持有时间极短）
+// ---------------------------------------------------------------------------
+
+static MARKET_LIST_SOURCE: RwLock<String> = RwLock::new(String::new());
+static MARKET_DOWNLOAD_SOURCE: RwLock<String> = RwLock::new(String::new());
+
+/// 把设置中的模组市场源同步到运行时镜像（启动加载与每次保存后调用）
+pub fn sync_market_sources(s: &AppSettings) {
+    if let Ok(mut v) = MARKET_LIST_SOURCE.write() {
+        *v = s.market_list_source.clone();
+    }
+    if let Ok(mut v) = MARKET_DOWNLOAD_SOURCE.write() {
+        *v = s.market_download_source.clone();
+    }
+}
+
+/// 模组市场列表加载源（"official" | "mirror"；异常回落 official）
+pub fn market_list_source() -> String {
+    MARKET_LIST_SOURCE
+        .read()
+        .map(|v| v.clone())
+        .unwrap_or_else(|_| default_market_list_source())
+}
+
+/// 模组市场下载源（"mirror" | "official"；异常回落 mirror）
+pub fn market_download_source() -> String {
+    MARKET_DOWNLOAD_SOURCE
+        .read()
+        .map(|v| v.clone())
+        .unwrap_or_else(|_| default_market_download_source())
 }
 
 impl Default for AppSettings {
@@ -80,6 +136,11 @@ impl Default for AppSettings {
             background_dim: 25,
             background_theme: "auto".to_string(),
             custom_java_paths: Vec::new(),
+            hide_on_launch: true,
+            market_list_source: default_market_list_source(),
+            market_download_source: default_market_download_source(),
+            update_check_enabled: true,
+            update_skipped_version: String::new(),
         }
     }
 }
@@ -130,6 +191,21 @@ impl AppSettings {
             return Err(format!("未知的下载源策略：{src}"));
         }
         self.download_source = src;
+
+        // 模组市场源：仅允许两档枚举
+        for (name, val) in [
+            ("模组市场列表加载源", &mut self.market_list_source),
+            ("模组市场下载源", &mut self.market_download_source),
+        ] {
+            let v = val.trim().to_string();
+            if !matches!(v.as_str(), "official" | "mirror") {
+                return Err(format!("未知的{name}：{v}"));
+            }
+            *val = v;
+        }
+
+        // 跳过的更新版本：去空白
+        self.update_skipped_version = self.update_skipped_version.trim().to_string();
 
         if !(1..=256).contains(&self.global_concurrency) {
             return Err("全局并发上限必须在 1–256 之间".to_string());

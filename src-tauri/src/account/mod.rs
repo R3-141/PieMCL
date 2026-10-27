@@ -8,6 +8,8 @@
 // 决策记录：token 明文 JSON 存储（用户决策）；全局单一激活账户；
 // 离线皮肤仅支持抓取正版玩家注入（不支持自定义上传）；离线披风不做。
 
+pub mod authlib_auth;
+pub mod littleskin_oauth;
 pub mod local_ygg;
 pub mod ms_auth;
 pub mod profile;
@@ -47,12 +49,19 @@ pub struct CapeEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfflineSkin {
-    /// 来源正版玩家名
+    /// 来源：player（正版玩家名抓取）/ file（本地文件）/ url（网络地址）/ preset（内置预设）
+    #[serde(default = "default_skin_source")]
+    pub source: String,
+    /// 来源标识：玩家名 / 文件名 / URL / Steve、Alex
     pub source_name: String,
     /// classic / slim
     pub variant: String,
     /// 抓取时间（epoch 秒）
     pub fetched_at: i64,
+}
+
+fn default_skin_source() -> String {
+    "player".to_string()
 }
 
 /// 单个账户（离线 / 微软正版）。
@@ -91,6 +100,20 @@ pub struct Account {
     #[serde(default)]
     pub xuid: Option<String>,
 
+    // ---- 皮肤站账户专属（authlib-injector；离线/微软为 None）----
+    /// 站点根地址（如 https://littleskin.cn；-javaagent 注入参数用）
+    #[serde(default)]
+    pub auth_server_url: Option<String>,
+    /// 认证 API 根（如 https://littleskin.cn/api/yggdrasil；validate/refresh 用）
+    #[serde(default)]
+    pub auth_api_root: Option<String>,
+    /// 站点名（展示用）
+    #[serde(default)]
+    pub auth_server_name: Option<String>,
+    /// 皮肤站 accessToken（明文存储，与微软 token 同一决策）
+    #[serde(default)]
+    pub auth_access_token: Option<String>,
+
     // ---- 正版 profile 缓存（批次 C）----
     #[serde(default)]
     pub skins: Vec<SkinEntry>,
@@ -110,6 +133,11 @@ impl Account {
         self.kind == "offline"
     }
 
+    /// 是否为皮肤站账户（authlib-injector）
+    pub fn is_authlib(&self) -> bool {
+        self.kind == "authlib"
+    }
+
     /// 前端可见视图（剥离全部 token 字段）
     pub fn view(&self) -> AccountView {
         AccountView {
@@ -122,6 +150,8 @@ impl Account {
             capes: self.capes.clone(),
             active_cape_id: self.active_cape_id.clone(),
             offline_skin: self.offline_skin.clone(),
+            server_url: self.auth_server_url.clone(),
+            server_name: self.auth_server_name.clone(),
         }
     }
 }
@@ -145,6 +175,11 @@ pub struct AccountView {
     /// 离线账户注入皮肤元数据（离线皮肤功能）
     #[serde(default)]
     pub offline_skin: Option<OfflineSkin>,
+    /// 皮肤站账户：站点根地址与站点名（其他类型为 None）
+    #[serde(default)]
+    pub server_url: Option<String>,
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 /// 离线玩家 ID 合法性：3–16 位字母 / 数字 / 下划线（与正版的玩家名规则一致）

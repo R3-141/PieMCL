@@ -157,33 +157,43 @@ pub async fn resolve_target(address: &str) -> Result<Target, String> {
 // MOTD：JSON text component / legacy 字符串 → § 颜色码字符串
 // ---------------------------------------------------------------------------
 
-/// 颜色名 → § 色码
-fn color_code(name: &str) -> Option<char> {
-    Some(match name {
-        "black" => '0',
-        "dark_blue" => '1',
-        "dark_green" => '2',
-        "dark_aqua" => '3',
-        "dark_red" => '4',
-        "dark_purple" => '5',
-        "gold" => '6',
-        "gray" => '7',
-        "dark_gray" => '8',
-        "blue" => '9',
-        "green" => 'a',
-        "aqua" => 'b',
-        "red" => 'c',
-        "light_purple" => 'd',
-        "yellow" => 'e',
-        "white" => 'f',
-        _ => return None,
-    })
+/// 颜色名 / 十六进制色 → 色码（命名色为单字符；hex 为 `#rrggbb`，
+/// 由前端 `§#rrggbb` 约定渲染——现代服务端（Paper 等）MOTD 常带 hex 颜色，
+/// 只映射 16 个命名色会把颜色整个丢掉）
+fn color_code(name: &str) -> Option<String> {
+    let named: Option<char> = match name {
+        "black" => Some('0'),
+        "dark_blue" => Some('1'),
+        "dark_green" => Some('2'),
+        "dark_aqua" => Some('3'),
+        "dark_red" => Some('4'),
+        "dark_purple" => Some('5'),
+        "gold" => Some('6'),
+        "gray" => Some('7'),
+        "dark_gray" => Some('8'),
+        "blue" => Some('9'),
+        "green" => Some('a'),
+        "aqua" => Some('b'),
+        "red" => Some('c'),
+        "light_purple" => Some('d'),
+        "yellow" => Some('e'),
+        "white" => Some('f'),
+        _ => None,
+    };
+    if let Some(c) = named {
+        return Some(c.to_string());
+    }
+    if name.len() == 7 && name.starts_with('#') && name[1..].bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(name.to_lowercase());
+    }
+    None
 }
 
 /// 段落样式（继承上下文后的有效值）
 #[derive(Clone, Default)]
 struct Style {
-    color: Option<char>,
+    /// 单字符 § 色码 或 `#rrggbb`（十六进制色，前端按 `§#rrggbb` 约定渲染）
+    color: Option<String>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -195,9 +205,9 @@ impl Style {
     /// 当前样式 → § 码序列（色码在前，格式码在后）
     fn codes(&self) -> String {
         let mut out = String::new();
-        if let Some(c) = self.color {
+        if let Some(c) = &self.color {
             out.push('§');
-            out.push(c);
+            out.push_str(c);
         }
         if self.bold {
             out.push_str("§l");

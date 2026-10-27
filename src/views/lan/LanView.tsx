@@ -21,7 +21,7 @@ const inputCls = 'w-full rounded-lg border border-neutral-200 bg-transparent px-
 const btnGhostCls =
   'rounded-lg border border-neutral-200 px-3 py-2 text-sm transition-colors duration-150 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:hover:bg-neutral-800'
 
-/** 首次打开联机页的免责声明确认标记（localStorage 持久化） */
+/** 首次打开联机页的免责声明确认标记（localStorage 持久化：仅首次使用时弹出） */
 const DISCLAIMER_KEY = 'piemcl-lan-disclaimer-ack'
 
 /** 隧道类型徽章 */
@@ -80,7 +80,7 @@ export function LanView() {
   // 两步删除确认（记录待删除的隧道 id，超时自动还原）
   const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
   const [showCreate, setShowCreate] = useState(false)
-  // 首次打开联机页的免责声明弹窗（必须阅读 5 秒才能关闭）
+  // 首次打开联机页的免责声明弹窗（必须阅读 5 秒才能关闭；确认后永久不再弹）
   const [showDisclaimer, setShowDisclaimer] = useState(
     () => localStorage.getItem(DISCLAIMER_KEY) !== '1',
   )

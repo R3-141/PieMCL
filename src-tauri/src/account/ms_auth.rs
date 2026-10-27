@@ -393,6 +393,10 @@ fn save_login_account(
                 mc_expires_at: Some(now_secs() + chain.mc_expires_in.max(0)),
                 uhs: Some(chain.uhs.clone()),
                 xuid: Some(chain.xuid.clone()),
+                auth_server_url: None,
+                auth_api_root: None,
+                auth_server_name: None,
+                auth_access_token: None,
                 skins: parse_skins(profile),
                 capes: parse_capes(profile),
                 active_cape_id: profile

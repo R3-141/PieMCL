@@ -76,13 +76,19 @@ async fn get_json(client: &reqwest::Client, url: &str) -> AppResult<serde_json::
         .map_err(|e| AppError::msg(format!("CurseForge 响应解析失败：{e}")))
 }
 
-/// API GET 请求：MCIMirror 镜像优先，官方源兜底。path_and_query 为相对 API 根的路径（含查询串）
+/// API GET 请求：按「模组市场 · 列表加载源」设置决定 MCImirror / 官方的优先顺序，
+/// 另一源始终兜底。path_and_query 为相对 API 根的路径（含查询串）
 async fn get_json_api(
     client: &reqwest::Client,
     path_and_query: &str,
 ) -> AppResult<serde_json::Value> {
+    let bases: [&str; 2] = if crate::core::settings::market_list_source() == "mirror" {
+        [API_MIRROR, API]
+    } else {
+        [API, API_MIRROR]
+    };
     let mut last_err: Option<AppError> = None;
-    for base in [API_MIRROR, API] {
+    for base in bases {
         match get_json(client, &format!("{base}{path_and_query}")).await {
             Ok(v) => return Ok(v),
             Err(e) => last_err = Some(e),
@@ -180,7 +186,8 @@ pub async fn search(
         "/mods/search?gameId=432&searchFilter={q}&sortField={sort_field}&sortOrder=desc&pageSize=20&index={index}",
         q = urlencode(query),
     );
-    if !mc_version.is_empty() {
+    // 版本过滤仅在 mc_version 形如版本号时下发（非法值如整合包名会导致服务端报错）
+    if crate::instance::foreign::looks_like_mc_version(mc_version) {
         path.push_str(&format!("&gameVersion={}", urlencode(mc_version)));
     }
     if let Some(lid) = loader_id(loader) {

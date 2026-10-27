@@ -71,6 +71,18 @@ function parseMotd(s: string): MotdSeg[] {
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]
     if (ch === '§' && i + 1 < s.length) {
+      // 十六进制色标记（后端约定）：§#rrggbb
+      if (
+        s[i + 1] === '#' &&
+        i + 7 < s.length &&
+        /^#[0-9a-fA-F]{6}$/.test(s.slice(i + 1, i + 8))
+      ) {
+        flush()
+        color = s.slice(i + 1, i + 8).toLowerCase()
+        bold = italic = underline = strike = obf = false
+        i += 7
+        continue
+      }
       flush()
       const code = s[i + 1].toLowerCase()
       i++
@@ -94,9 +106,9 @@ function parseMotd(s: string): MotdSeg[] {
   return segs
 }
 
-/** MOTD 渲染（像素字体；§k 混淆用闪烁动画模拟） */
+/** MOTD 渲染（像素字体；§k 混淆用闪烁动画模拟；含 MiniMessage 标签时走 MM 解析） */
 function MotdText({ text }: { text: string }) {
-  const segs = parseMotd(text)
+  const segs = mmLooksLike(text) ? mmParse(text) : parseMotd(text)
   return (
     <p className="whitespace-pre-wrap font-mono text-[13px] leading-5 break-all">
       {segs.map((seg, i) => (
@@ -120,6 +132,361 @@ function MotdText({ text }: { text: string }) {
       ))}
     </p>
   )
+}
+
+// ---------------------------------------------------------------------------
+// MiniMessage 渲染（Adventure 格式：Paper 系服务器常用）
+// 支持子集：<bold> <italic> <underlined> <strikethrough> <obfuscated> <reset>
+// <color:#hex|named> <#hex> <gradient:#a:#b> <rainbow> <newline>/<br>，
+// 支持嵌套与缩写（<b>/<i>/<u>/<st>/<obf>）；hover/click 等未知标签仅剥离标签本身。
+// 渐变 / 彩虹按字符插值成逐字符颜色。
+// ---------------------------------------------------------------------------
+
+const MM_NAMED: Record<string, string> = COLOR_HEX
+
+/** MiniMessage 命名颜色标签（<yellow> 等）→ hex */
+const MM_NAME_TO_HEX: Record<string, string> = {
+  black: '#000000',
+  dark_blue: '#0000AA',
+  dark_green: '#00AA00',
+  dark_aqua: '#00AAAA',
+  dark_red: '#AA0000',
+  dark_purple: '#AA00AA',
+  gold: '#FFAA00',
+  gray: '#AAAAAA',
+  grey: '#AAAAAA',
+  dark_gray: '#555555',
+  dark_grey: '#555555',
+  blue: '#5555FF',
+  green: '#55FF55',
+  aqua: '#55FFFF',
+  red: '#FF5555',
+  light_purple: '#FF55FF',
+  yellow: '#FFFF55',
+  white: '#FFFFFF',
+}
+
+function mmLooksLike(s: string): boolean {
+  return /<(\/?)(bold|b|italic|i|em|underl?ined|u|strikethrough|st|obf(?:uscated)?|rainbow|gradient|color|c|reset|r|newline|br|hover|click|yellow|gold|aqua|green|red|gray|grey|dark_gray|light_purple|dark_purple|blue|dark_blue|dark_aqua|dark_green|dark_red|dark_purple|black|white|#[0-9a-fA-F]{6})\s*[>:]/.test(
+    s,
+  )
+}
+
+function mmHexColor(v: string, fallback: string): string {
+  const t = v.trim()
+  if (/^#[0-9a-fA-F]{6}$/.test(t)) return t.toLowerCase()
+  return MM_NAME_TO_HEX[t.toLowerCase()] ?? MM_NAMED[t.toLowerCase()] ?? fallback
+}
+
+/** HSL 色相 → hex（彩虹用，饱和度/亮度取鲜艳档） */
+function mmRainbowHex(hue: number): string {
+  const h = ((hue % 360) + 360) % 360
+  const s = 1
+  const l = 0.5
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+  const rgb =
+    h < 60
+      ? [c, x, 0]
+      : h < 120
+        ? [x, c, 0]
+        : h < 180
+          ? [0, c, x]
+          : h < 240
+            ? [0, x, c]
+            : h < 300
+              ? [x, 0, c]
+              : [c, 0, x]
+  return (
+    '#' +
+    rgb
+      .map((v) => Math.round((v + m) * 255))
+      .map((v) => Math.min(255, Math.max(0, v)).toString(16).padStart(2, '0'))
+      .join('')
+  )
+}
+
+interface MmStyle {
+  color: string
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  strike: boolean
+  obf: boolean
+  /** 显式设置过颜色（渐变区域内嵌套颜色标签优先于插值） */
+  explicit: boolean
+}
+
+const MM_DEFAULT: MmStyle = {
+  color: '#FFFFFF',
+  bold: false,
+  italic: false,
+  underline: false,
+  strike: false,
+  obf: false,
+  explicit: false,
+}
+
+/** 找到与 src[from..] 处同名开标签匹配的关闭标签位置（计同名嵌套深度） */
+function mmFindClose(src: string, from: number, name: string): number {
+  const openRe = new RegExp(`<${name}[\\s>:]`, 'gi')
+  const closeRe = new RegExp(`</${name}\\s*>`, 'gi')
+  let depth = 1
+  openRe.lastIndex = from
+  closeRe.lastIndex = from
+  for (;;) {
+    const o = openRe.exec(src)
+    const c = closeRe.exec(src)
+    if (!c) return -1
+    if (o && o.index < c.index) {
+      depth++
+      openRe.lastIndex = o.index + 1
+    } else {
+      depth--
+      if (depth === 0) return c.index
+      closeRe.lastIndex = c.index + 1
+    }
+  }
+}
+
+/** 递归渲染：colorFn 非空时逐字符取色（渐变 / 彩虹区域） */
+function mmRender(
+  src: string,
+  styleIn: MmStyle,
+  colorFn: ((i: number) => string) | null,
+  out: MotdSeg[],
+): void {
+  let style = { ...styleIn }
+  const stack: MmStyle[] = []
+  let buf = ''
+  let ci = 0 // 渐变插值用的字符计数（不含标签本身）
+  const flush = () => {
+    if (buf) {
+      out.push({
+        text: buf,
+        color: !style.explicit && colorFn ? colorFn(ci - buf.length) : style.color,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        strike: style.strike,
+        obf: style.obf,
+      })
+      buf = ''
+    }
+  }
+  let i = 0
+  while (i < src.length) {
+    // § 码兼容：真实服务器的 MOTD 可能是 § 码与 MiniMessage 混合格式
+    if (src[i] === '§' && i + 1 < src.length) {
+      flush()
+      const code = src[i + 1].toLowerCase()
+      i += 2
+      if (COLOR_HEX[code]) {
+        style.color = COLOR_HEX[code]
+        style.explicit = true
+      } else if (code === 'l') style.bold = true
+      else if (code === 'o') style.italic = true
+      else if (code === 'n') style.underline = true
+      else if (code === 'm') style.strike = true
+      else if (code === 'k') style.obf = true
+      else if (code === 'r') style = { ...MM_DEFAULT }
+      continue
+    }
+    if (src.startsWith('\\<', i)) {
+      buf += '<'
+      i += 2
+      ci++
+      if (colorFn) flush()
+      continue
+    }
+    if (src[i] !== '<') {
+      buf += src[i]
+      i++
+      ci++
+      // 渐变 / 彩虹区域逐字符 flush：每个字符独立插值取色
+      if (colorFn) flush()
+      continue
+    }
+    const close = src.indexOf('>', i)
+    if (close === -1) {
+      buf += src[i]
+      i++
+      ci++
+      continue
+    }
+    const raw = src.slice(i + 1, close)
+    i = close + 1
+    const closing = raw.startsWith('/')
+    const body = closing ? raw.slice(1) : raw
+    const colon = body.indexOf(':')
+    let name = (colon === -1 ? body : body.slice(0, colon)).trim().toLowerCase()
+    let args = colon === -1 ? '' : body.slice(colon + 1)
+    // <#RRGGBB> 简写：完整 hex 在 name 中，归一到 '#' + args 形态
+    if (name.startsWith('#')) {
+      args = name
+      name = '#'
+    }
+    switch (name) {
+      case 'bold':
+      case 'b': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.bold = true
+        }
+        break
+      }
+      case 'italic':
+      case 'i':
+      case 'em': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.italic = true
+        }
+        break
+      }
+      case 'underlined':
+      case 'u': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.underline = true
+        }
+        break
+      }
+      case 'strikethrough':
+      case 'st': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.strike = true
+        }
+        break
+      }
+      case 'obfuscated':
+      case 'obf': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.obf = true
+        }
+        break
+      }
+      case 'color':
+      case 'c':
+      case '#': {
+        flush()
+        if (closing) {
+          style = stack.pop() ?? style
+        } else {
+          stack.push({ ...style })
+          style.color = mmHexColor(args, style.color)
+          style.explicit = true
+        }
+        break
+      }
+      case 'reset':
+      case 'r': {
+        flush()
+        style = { ...MM_DEFAULT }
+        stack.length = 0
+        break
+      }
+      case 'newline':
+      case 'br': {
+        flush()
+        buf = '\n'
+        flush()
+        ci++
+        break
+      }
+      case 'gradient': {
+        flush()
+        if (closing) break
+        // 从当前位置（开标签之后）找匹配关闭标签，避免把自身计入嵌套
+        const end = mmFindClose(src, i, 'gradient')
+        if (end === -1) break
+        const inner = src.slice(i, end)
+        i = end + `</gradient>`.length
+        // 色标支持 hex 与命名颜色（<gradient:yellow:gold>），忽略 phase 等非颜色参数
+        const stops = args
+          .split(':')
+          .map((a) => a.trim())
+          .filter((a) => /^#[0-9a-fA-F]{6}$/.test(a) || MM_NAME_TO_HEX[a.toLowerCase()])
+          .map((a) => mmHexColor(a, '#FFFFFF'))
+        const from = stops[0] ?? '#FFFFFF'
+        const to = stops[stops.length - 1] ?? from
+        const len = Math.max(1, inner.replace(/<[^>]*>/g, '').length)
+        const colorFnG = (ci0: number) => {
+          const t = stops.length >= 3 ? (ci0 / len) * (stops.length - 1) : ci0 / len
+          const segIdx = Math.min(Math.floor(t), stops.length >= 3 ? stops.length - 2 : 0)
+          const local = stops.length >= 3 ? t - segIdx : t
+          const a = stops.length >= 3 ? stops[segIdx] : from
+          const b = stops.length >= 3 ? stops[segIdx + 1] ?? to : to
+          const pa = parseInt(a.slice(1), 16)
+          const pb = parseInt(b.slice(1), 16)
+          const mix = (sh: number) => {
+            const av = (pa >> sh) & 0xff
+            const bv = (pb >> sh) & 0xff
+            return Math.round(av + (bv - av) * local)
+          }
+          return `#${[16, 8, 0].map(mix).map((v) => v.toString(16).padStart(2, '0')).join('')}`
+        }
+        mmRender(inner, { ...style }, colorFnG, out)
+        break
+      }
+      case 'rainbow': {
+        flush()
+        if (closing) break
+        const end = mmFindClose(src, i, 'rainbow')
+        if (end === -1) break
+        const inner = src.slice(i, end)
+        i = end + `</rainbow>`.length
+        const phase = parseFloat(args.split(':')[0] ?? '')
+        const phaseOff = isNaN(phase) ? 0 : (phase * 360) % 360
+        const len = Math.max(1, inner.replace(/<[^>]*>/g, '').length)
+        const colorFnR = (ci0: number) =>
+          mmRainbowHex(phaseOff + (ci0 / Math.max(1, len)) * 360)
+        mmRender(inner, { ...style }, colorFnR, out)
+        break
+      }
+      default: {
+        // 命名颜色标签（<yellow> 等）：开 / 闭与 color 标签同语义
+        if (MM_NAME_TO_HEX[name]) {
+          flush()
+          if (closing) {
+            style = stack.pop() ?? style
+          } else {
+            stack.push({ ...style })
+            style.color = MM_NAME_TO_HEX[name]
+            style.explicit = true
+          }
+        }
+        // 其余（hover / click / 未知标签）：剥离标签本身，内容照常渲染
+        break
+      }
+    }
+  }
+  flush()
+}
+
+/** MiniMessage → 样式段落（仅在含 MM 标签时被调用） */
+function mmParse(s: string): MotdSeg[] {
+  const out: MotdSeg[] = []
+  mmRender(s.replace(/\r\n/g, '\n'), { ...MM_DEFAULT }, null, out)
+  return out.length > 0 ? out : parseMotd(s)
 }
 
 // ---------------------------------------------------------------------------

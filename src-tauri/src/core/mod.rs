@@ -4,3 +4,4 @@ pub mod error;
 pub mod net;
 pub mod paths;
 pub mod settings;
+pub mod update;

@@ -27,6 +27,9 @@ pub struct JvmSettings {
     /// 最大内存 MB（前端滑块范围 1024–32768）
     #[serde(default = "default_max_memory")]
     pub max_memory_mb: u32,
+    /// 自动分配内存：开启时启动前按物理内存计算，忽略上面的手动值（默认开启）
+    #[serde(default = "default_true")]
+    pub auto_memory: bool,
     /// 附加 JVM 参数（原样追加在预设之后，可覆盖同名参数）
     #[serde(default)]
     pub extra_args: String,
@@ -49,6 +52,7 @@ impl Default for JvmSettings {
         Self {
             min_memory_mb: 0,
             max_memory_mb: default_max_memory(),
+            auto_memory: true,
             extra_args: String::new(),
             preset: default_preset(),
             window_width: None,
@@ -170,6 +174,9 @@ pub struct UpdateInstancePatch {
     pub java_path: Option<serde_json::Value>,
     pub min_memory_mb: Option<u32>,
     pub max_memory_mb: Option<u32>,
+    /// 自动分配内存开关
+    #[serde(default)]
+    pub auto_memory: Option<bool>,
     pub extra_args: Option<String>,
     /// JVM 优化预设：default / low_spec / big_modpack
     #[serde(default)]

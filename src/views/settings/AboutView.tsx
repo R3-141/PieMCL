@@ -144,6 +144,7 @@ export function AboutView({ onBack }: { onBack: () => void }) {
         </p>
         <div className="mt-3 space-y-0.5">
           {[
+            { label: '启动器官网', desc: 'PieMCL.top', url: 'https://piemcl.top' },
             { label: 'GitHub 开源地址', desc: 'https://github.com/R3-141/PieMCL', url: 'https://github.com/R3-141/PieMCL' },
             { label: '作者 B 站主页', desc: 'https://space.bilibili.com/514312552', url: 'https://space.bilibili.com/514312552' },
             { label: '联系邮箱', desc: 'Meonby@outlook.com', url: 'mailto:Meonby@outlook.com' },

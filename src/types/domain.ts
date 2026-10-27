@@ -22,6 +22,8 @@ export interface InstanceSummary {
 export interface JvmSettings {
   minMemoryMb: number
   maxMemoryMb: number
+  /** 自动分配内存：启动时按物理内存计算，忽略手动值 */
+  autoMemory: boolean
   extraArgs: string
   /** JVM 优化预设：default / low_spec / big_modpack */
   preset: string
@@ -48,6 +50,7 @@ export interface UpdateInstancePatch {
   javaPath?: string | null
   minMemoryMb?: number
   maxMemoryMb?: number
+  autoMemory?: boolean
   extraArgs?: string
   preset?: string
   fullscreen?: boolean
@@ -78,6 +81,8 @@ export interface JavaInfo {
   arch: string
   /** 发行版（Temurin / Oracle Corporation / Microsoft …） */
   vendor: string
+  /** 是否为用户手动登记的路径（可在 Java 管理页移除登记） */
+  custom: boolean
 }
 
 /** 实例的 Java 满足状态 */
@@ -161,6 +166,27 @@ export interface AppSettings {
   backgroundDim: number
   /** 背景启用时的界面明暗：auto（跟随主题）/ dark / light */
   backgroundTheme: string
+  /** 启动实例后隐藏启动器窗口，全部游戏退出后恢复显示（默认开启） */
+  hideOnLaunch: boolean
+  /** 模组市场列表加载源：official（Modrinth 官方，默认）/ mirror（MCImirror）；另一源始终兜底 */
+  marketListSource: string
+  /** 模组市场下载源：mirror（MCImirror，默认）/ official（Modrinth 官方）；另一源始终兜底 */
+  marketDownloadSource: string
+  /** 启动时检查更新（默认开启；关闭后仅设置页手动检查可用） */
+  updateCheckEnabled: boolean
+  /** 用户选择跳过的更新版本号（空 = 未跳过） */
+  updateSkippedVersion: string
+}
+
+/** 更新检查结果（check_update） */
+export interface UpdateCheckResult {
+  hasUpdate: boolean
+  currentVersion: string
+  latestVersion: string
+  /** 更新说明（Release body，Markdown 源码按纯文本渲染） */
+  notes: string
+  /** 发布页链接 */
+  htmlUrl: string
 }
 
 /** 正版 profile 的单张皮肤（缓存） */
@@ -184,7 +210,9 @@ export interface CapeEntry {
 
 /** 离线账户注入皮肤元数据（PNG 存本地 skins/ 目录） */
 export interface OfflineSkinMeta {
-  /** 来源正版玩家名 */
+  /** 来源：player（正版玩家名抓取）/ file（本地文件）/ url（网络地址）/ preset（内置预设） */
+  source: string
+  /** 来源标识：玩家名 / 文件名 / URL / Steve、Alex */
   sourceName: string
   /** classic / slim */
   variant: string
@@ -195,7 +223,7 @@ export interface OfflineSkinMeta {
 /** 账户视图（list_accounts；token 等敏感字段不出 Rust） */
 export interface AccountView {
   id: string
-  /** offline / microsoft */
+  /** offline / microsoft / authlib */
   kind: string
   name: string
   uuid: string
@@ -207,12 +235,57 @@ export interface AccountView {
   activeCapeId: string | null
   /** 离线账户注入皮肤元数据（批次 D） */
   offlineSkin: OfflineSkinMeta | null
+  /** 皮肤站账户（authlib）：站点根地址与站点名（其他类型为 null） */
+  serverUrl: string | null
+  serverName: string | null
+}
+
+/** 皮肤站站点元数据（authlib-injector 规范） */
+export interface AuthlibServerMeta {
+  /** 真实 API 根（如 https://littleskin.cn/api/yggdrasil） */
+  apiRoot: string
+  serverName: string
+  registerUrl: string | null
+  homepageUrl: string | null
+}
+
+/** 皮肤站角色（账号下的游戏角色） */
+export interface AuthlibProfile {
+  id: string
+  name: string
+}
+
+/** 皮肤站账密登录结果：account 非空 = 已创建；否则需在 profiles 中选择角色 */
+export interface AuthlibLoginResult {
+  account: AccountView | null
+  profiles: AuthlibProfile[]
+}
+
+/** 皮肤站角色当前皮肤（3D 预览用） */
+export interface AuthlibSkinData {
+  /** PNG 的 data URL */
+  dataUrl: string
+  /** classic / slim */
+  model: string
 }
 
 /** 账户列表结果 */
 export interface AccountListResult {
   accounts: AccountView[]
   activeId: string | null
+}
+
+/** authlib-oauth-state 事件 payload（LittleSkin OAuth 设备码登录流程） */
+export interface AuthlibOauthStatePayload {
+  /** code=展示授权码 pending=等待授权/取令牌 success / failed */
+  stage: string
+  /** code 阶段：授权码与授权页 URL */
+  userCode?: string
+  verifyUrl?: string
+  /** code 阶段：Rust 侧是否已自动复制到剪贴板 */
+  copied?: boolean
+  /** pending / failed 阶段的提示文案 */
+  message?: string
 }
 
 /** ms-login-state 事件 payload（微软设备码登录流程） */

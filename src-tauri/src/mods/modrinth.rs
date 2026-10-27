@@ -24,7 +24,8 @@ const USER_AGENT: &str = concat!("PieMCL/", env!("CARGO_PKG_VERSION"));
 fn client() -> AppResult<reqwest::Client> {
     crate::core::net::apply_proxy(reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(15)))
+        // 连接超时较此前（15s）缩短：首选源不可达时更快切换到兜底源
+        .connect_timeout(std::time::Duration::from_secs(8)))
         .build()
         .map_err(|e| AppError::msg(format!("构建 HTTP 客户端失败：{e}")))
 }
@@ -41,14 +42,20 @@ async fn get_json(client: &reqwest::Client, url: &str) -> AppResult<serde_json::
         .map_err(|e| AppError::msg(format!("Modrinth 响应解析失败：{e}")))
 }
 
-/// API 请求：官方源优先（热门列表等元信息对延迟敏感），MCIMirror 兜底。
+/// API 请求：按「模组市场 · 列表加载源」设置决定官方 / MCImirror 的优先顺序，
+/// 另一源始终兜底（首选连接失败 / 超时 / 5xx 时立即切换）。
 /// path_and_query 为相对 API 根的路径（含查询串）。
 async fn get_json_api(
     client: &reqwest::Client,
     path_and_query: &str,
 ) -> AppResult<serde_json::Value> {
+    let bases: [&str; 2] = if crate::core::settings::market_list_source() == "mirror" {
+        [API_MIRROR, API]
+    } else {
+        [API, API_MIRROR]
+    };
     let mut last_err: Option<AppError> = None;
-    for base in [API, API_MIRROR] {
+    for base in bases {
         match get_json(client, &format!("{base}{path_and_query}")).await {
             Ok(v) => return Ok(v),
             Err(e) => last_err = Some(e),
@@ -178,7 +185,9 @@ pub async fn search(
     project_type: &str,
 ) -> AppResult<(Vec<SearchHit>, u64)> {
     let mut facets = vec![json!([format!("project_type:{project_type}")])];
-    if !mc_version.is_empty() {
+    // 版本 facet 仅在 mc_version 形如版本号（1.21.1）时下发：
+    // 历史导入实例的 mc_version 可能是整合包名等非法值，非法值会导致服务端报错
+    if crate::instance::foreign::looks_like_mc_version(mc_version) {
         facets.push(json!([format!("versions:{mc_version}")]));
     }
     if let Some(l) = loader {

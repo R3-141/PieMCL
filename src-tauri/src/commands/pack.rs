@@ -612,7 +612,7 @@ pub async fn import_modpack(
             for f in &mrpack_files {
                 let mut req = DownloadRequest::new(
                     f.path.clone(),
-                    crate::download::mirror::mcimirror_candidates(&f.urls),
+                    crate::download::mirror::market_candidates(&f.urls),
                     game_dir.join(&f.path),
                 );
                 if let Some(sha) = &f.sha1 {
@@ -655,7 +655,7 @@ pub async fn import_modpack(
             let rel = format!("mods/{}", f.file_name);
             let mut req = DownloadRequest::new(
                 rel.clone(),
-                crate::download::mirror::mcimirror_candidates(std::slice::from_ref(&spec_url)),
+                crate::download::mirror::market_candidates(std::slice::from_ref(&spec_url)),
                 game_dir.join(&rel),
             );
             if let Some(sha) = f.sha1() {

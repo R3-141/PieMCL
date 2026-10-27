@@ -1,16 +1,15 @@
-// Java 管理页：系统检测列表 + 各实例满足状态 + 自动下载快捷入口
+// Java 管理页：系统检测列表 + 各实例满足状态
 //
 // 数据来自 javaStore（全局共享，TopBar / 编辑对话框同源）；
 // java-installed 事件触发重检测（AppShell 已全局接线）。
+// 缺失的 Java 在启动对应实例时自动下载（Temurin JRE），无需手动入口；
+// 手动登记的 Java 可移除登记（仅取消登记，不删除文件）。
 
 import { useEffect, useState } from 'react'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { ipc } from '../../lib/ipc'
 import { useJavaStore } from '../../stores/javaStore'
-import { IconJava, IconPlus, IconSettings } from '../../components/common/Icons'
-
-/** 可快捷下载的 Java 版本 */
-const QUICK_DOWNLOADS = [21, 17, 8] as const
+import { IconJava, IconSettings } from '../../components/common/Icons'
 
 /** 满足状态徽章 */
 function SatisfiedBadge({ ok }: { ok: boolean }) {
@@ -33,27 +32,14 @@ export function JavaView() {
   const loading = useJavaStore((s) => s.loading)
   const error = useJavaStore((s) => s.error)
   const refresh = useJavaStore((s) => s.refresh)
-  const [downloading, setDownloading] = useState<number | null>(null)
   const [adding, setAdding] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [copiedPath, setCopiedPath] = useState<string | null>(null)
 
   // 首次进入未检测过时拉取
   useEffect(() => {
     if (javas === null && !loading) refresh()
   }, [javas, loading, refresh])
-
-  const handleDownload = async (major: number) => {
-    setActionError(null)
-    setDownloading(major)
-    try {
-      await ipc.downloadJava(major)
-      // 成功启动后由下载面板跟踪进度；任务完成后 java-installed 事件触发重检测
-    } catch (e) {
-      setActionError(String(e))
-    } finally {
-      setDownloading(null)
-    }
-  }
 
   // 手动登记 Java：选择 java.exe（或其目录），探测成功后纳入全局检测列表
   const handleAddCustom = async () => {
@@ -76,13 +62,44 @@ export function JavaView() {
     }
   }
 
+  /** 移除手动登记：仅取消登记不删文件，随后重新检测刷新列表 */
+  const handleRemoveCustom = async (path: string) => {
+    if (!window.confirm('移除该手动登记？\n仅取消登记（不再纳入检测），不会删除文件本身。')) return
+    setActionError(null)
+    try {
+      await ipc.removeCustomJava(path)
+      await refresh()
+    } catch (e) {
+      setActionError(String(e))
+    }
+  }
+
+  /** 复制完整路径 */
+  const copyPath = async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(path)
+      setCopiedPath(path)
+      window.setTimeout(() => setCopiedPath(null), 1500)
+    } catch {
+      /* 剪贴板不可用时忽略 */
+    }
+  }
+
+  // 不满足的实例排前面（最需要关注的置顶）
+  const sortedStatus = [...instanceStatus].sort((a, b) => Number(a.satisfied) - Number(b.satisfied))
+  const unsatisfiedCount = instanceStatus.filter((s) => !s.satisfied).length
+  const customCount = javas?.filter((j) => j.custom).length ?? 0
+
+  const btnGhost =
+    'shrink-0 rounded-md px-2 py-1 text-xs text-neutral-500 transition-colors duration-150 hover:bg-neutral-100 disabled:opacity-50 dark:text-neutral-400 dark:hover:bg-neutral-800'
+
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold">Java 管理</h1>
           <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
-            检测系统中的 Java 运行时，检查各实例的版本需求；缺少的版本可一键自动下载（Temurin JRE）
+            检测系统中的 Java 运行时并检查各实例的版本需求；启动实例时自动选择，缺失时自动下载
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -106,38 +123,31 @@ export function JavaView() {
         </div>
       </div>
 
+      {/* 概览统计条 */}
+      {javas !== null && (
+        <div className="flex items-center gap-4 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
+          <span>
+            已检测 <span className="font-medium">{javas.length}</span> 个 Java
+          </span>
+          {customCount > 0 && (
+            <span className="text-neutral-500 dark:text-neutral-400">
+              {customCount} 个手动登记
+            </span>
+          )}
+          <span className="ml-auto">
+            {unsatisfiedCount > 0 ? (
+              <span className="text-red-500">{unsatisfiedCount} 个实例 Java 不满足</span>
+            ) : (
+              instanceStatus.length > 0 && (
+                <span className="text-emerald-600 dark:text-emerald-400">全部实例满足</span>
+              )
+            )}
+          </span>
+        </div>
+      )}
+
       {error && <p className="text-sm text-red-500">{error}</p>}
       {actionError && <p className="text-sm text-red-500">{actionError}</p>}
-
-      {/* 自动下载快捷入口 */}
-      <section className="rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
-        <h2 className="mb-3 text-sm font-semibold">自动下载</h2>
-        <div className="flex flex-wrap gap-2">
-          {QUICK_DOWNLOADS.map((major) => {
-            const installed = javas?.some((j) => j.version >= major) ?? false
-            return (
-              <button
-                key={major}
-                type="button"
-                disabled={downloading !== null}
-                onClick={() => handleDownload(major)}
-                title={
-                  installed
-                    ? `系统中已存在 Java ${major} 及以上版本，仍可继续下载独立的 Temurin JRE`
-                    : `从 Adoptium 下载 Java ${major} 运行时`
-                }
-                className="flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors duration-150 hover:bg-accent-hover disabled:opacity-50"
-              >
-                <IconPlus className="size-4" />
-                {downloading === major ? `下载 Java ${major} 中…` : `下载 Java ${major}`}
-              </button>
-            )
-          })}
-        </div>
-        <p className="mt-2 text-xs text-neutral-400 dark:text-neutral-500">
-          下载进度在右侧下载面板跟踪；完成后自动解压到启动器数据目录并纳入检测
-        </p>
-      </section>
 
       {/* 检测到的 Java */}
       <section className="rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
@@ -149,7 +159,8 @@ export function JavaView() {
         ) : javas.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 text-neutral-400 dark:text-neutral-500">
             <IconJava className="size-8 opacity-40" />
-            <p className="text-sm">未检测到 Java，可使用上方按钮自动下载</p>
+            <p className="text-sm">未检测到 Java</p>
+            <p className="text-xs">启动需要 Java 的实例时会自动下载；也可点击右上角「手动添加 Java」登记</p>
           </div>
         ) : (
           <div className="space-y-2">
@@ -164,10 +175,44 @@ export function JavaView() {
                 <span className="shrink-0 rounded-md bg-neutral-100 px-1.5 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
                   {j.arch}
                 </span>
-                <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">{j.vendor}</span>
-                <span className="truncate text-xs text-neutral-400 dark:text-neutral-500" title={j.path}>
+                <span className="shrink-0 rounded-md bg-neutral-100 px-1.5 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                  {j.custom ? '手动登记' : '自动检测'}
+                </span>
+                <span className="hidden shrink-0 text-xs text-neutral-500 sm:inline dark:text-neutral-400">
+                  {j.vendor}
+                </span>
+                <span
+                  className="min-w-0 flex-1 truncate text-xs text-neutral-400 dark:text-neutral-500"
+                  title={j.path}
+                >
                   {j.path}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => void copyPath(j.path)}
+                  title="复制完整路径"
+                  className={btnGhost}
+                >
+                  {copiedPath === j.path ? '已复制' : '复制路径'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void ipc.revealPath(j.path)}
+                  title="在文件管理器中打开位置"
+                  className={btnGhost}
+                >
+                  打开位置
+                </button>
+                {j.custom && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRemoveCustom(j.path)}
+                    title="移除手动登记（不删除文件）"
+                    className="shrink-0 rounded-md px-2 py-1 text-xs text-red-400 transition-colors duration-150 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+                  >
+                    移除登记
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -183,7 +228,7 @@ export function JavaView() {
           </p>
         ) : (
           <div className="space-y-2">
-            {instanceStatus.map((s) => (
+            {sortedStatus.map((s) => (
               <div
                 key={s.instanceId}
                 className="flex items-center gap-2.5 rounded-lg border border-neutral-100 px-3 py-2 text-sm dark:border-neutral-800"
@@ -202,9 +247,18 @@ export function JavaView() {
                     ? `已指定：Java ${s.assignedVersion ?? '?'}`
                     : '自动选择'}
                 </span>
-                <span className="ml-auto">
-                  <SatisfiedBadge ok={s.satisfied} />
-                </span>
+                {s.satisfied ? (
+                  <span className="ml-auto">
+                    <SatisfiedBadge ok />
+                  </span>
+                ) : (
+                  <span className="ml-auto flex items-center gap-2">
+                    <span className="hidden text-xs text-neutral-400 md:inline dark:text-neutral-500">
+                      启动时将自动下载 Java {s.requiredJava}
+                    </span>
+                    <SatisfiedBadge ok={false} />
+                  </span>
+                )}
               </div>
             ))}
           </div>

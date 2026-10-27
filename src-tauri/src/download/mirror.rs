@@ -60,9 +60,9 @@ pub fn rewrite_with_mcimirror(official_url: &str) -> Option<String> {
     None
 }
 
-/// 生成 Modrinth / CurseForge 文件下载候选：MCIMirror 在前、官方兜底，去重。
+/// 生成 Modrinth / CurseForge 文件下载候选（镜像优先），去重。
 /// 不可镜像的 URL（mediafilez.forgecdn.net 等）原样保留。
-pub fn mcimirror_candidates(urls: &[String]) -> Vec<String> {
+pub fn mirror_first_candidates(urls: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(urls.len() * 2);
     for u in urls {
         if let Some(m) = rewrite_with_mcimirror(u) {
@@ -79,8 +79,7 @@ pub fn mcimirror_candidates(urls: &[String]) -> Vec<String> {
     out
 }
 
-/// 官方源优先 + MCIMirror 兜底的候选（图标等小资源用：
-/// 数量多、对延迟敏感，镜像的加速收益小于其抖动成本）
+/// 官方源优先 + MCIMirror 兜底的候选（纯函数：数量多、对延迟敏感的小资源）
 pub fn official_first_candidates(urls: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(urls.len() * 2);
     for u in urls {
@@ -96,6 +95,16 @@ pub fn official_first_candidates(urls: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// 按「模组市场 · 下载源」设置生成下载候选：所选源在前、另一源始终兜底。
+/// 模组 / 整合包文件与市场图标等所有 MCImirror 可镜像资源的统一入口。
+pub fn market_candidates(urls: &[String]) -> Vec<String> {
+    if crate::core::settings::market_download_source() == "official" {
+        official_first_candidates(urls)
+    } else {
+        mirror_first_candidates(urls)
+    }
 }
 
 /// 生成下载 URL 候选列表，去重。
@@ -178,12 +187,12 @@ mod tests {
     }
 
     #[test]
-    fn mcimirror_candidates_mirror_first_official_fallback() {
+    fn mirror_first_candidates_mirror_first_official_fallback() {
         let urls = vec![
             "https://cdn.modrinth.com/data/A/x.jar".to_string(),
             "https://mediafilez.forgecdn.net/files/1/2/f.jar".to_string(),
         ];
-        let c = mcimirror_candidates(&urls);
+        let c = mirror_first_candidates(&urls);
         assert_eq!(
             c,
             vec![
@@ -193,8 +202,36 @@ mod tests {
             ]
         );
         // 不可镜像的 URL 原样保留
-        let c = mcimirror_candidates(&["https://maven.fabricmc.net/x.jar".to_string()]);
+        let c = mirror_first_candidates(&["https://maven.fabricmc.net/x.jar".to_string()]);
         assert_eq!(c, vec!["https://maven.fabricmc.net/x.jar".to_string()]);
+    }
+
+    /// 按设置同步模组市场下载源（测试串行执行，避免全局镜像互相干扰）
+    fn sync_download_source(source: &str) {
+        let mut s = crate::core::settings::AppSettings::default();
+        s.market_download_source = source.to_string();
+        crate::core::settings::sync_market_sources(&s);
+    }
+
+    #[test]
+    fn market_candidates_follows_download_source_setting() {
+        let urls = vec!["https://cdn.modrinth.com/data/A/x.jar".to_string()];
+        let mirror = "https://mod.mcimirror.top/data/A/x.jar".to_string();
+        let official = "https://cdn.modrinth.com/data/A/x.jar".to_string();
+
+        sync_download_source("mirror");
+        assert_eq!(
+            market_candidates(&urls),
+            vec![mirror.clone(), official.clone()]
+        );
+        sync_download_source("official");
+        assert_eq!(
+            market_candidates(&urls),
+            vec![official.clone(), mirror.clone()]
+        );
+        // 无论何种设置，两源均在候选中（兜底保证）
+        assert_eq!(market_candidates(&urls).len(), 2);
+        sync_download_source("mirror");
     }
 
     #[test]

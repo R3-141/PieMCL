@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pie MCL",
-  "version": "26.10.25",
+  "version": "26.10.27",
   "identifier": "com.piemcl.launcher",
   "build": {
     "beforeDevCommand": "pnpm dev",

@@ -1,7 +1,7 @@
 {
   "name": "piemcl",
   "private": true,
-  "version": "26.10.25",
+  "version": "26.10.27",
   "type": "module",
   "scripts": {
     "dev": "vite",

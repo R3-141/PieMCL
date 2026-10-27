@@ -103,7 +103,6 @@ function OfflineLogo() {
 
 export function HomeView() {
   const setCurrentView = useUiStore((s) => s.setCurrentView)
-  const selectedInstanceId = useUiStore((s) => s.selectedInstanceId)
   const setSelectedInstance = useUiStore((s) => s.setSelectedInstance)
   const launchEntries = useLaunchStore((s) => s.entries)
 
@@ -112,6 +111,8 @@ export function HomeView() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 抽屉临时选择：仅影响下一次启动目标，启动后清空回退「最近启动」
+  const [drawerPick, setDrawerPick] = useState<string | null>(null)
   // 皮肤预览刷新计数（重挂载 3D 画布 + 重拉贴图）
   const [refreshKey, setRefreshKey] = useState(0)
 
@@ -196,14 +197,17 @@ export function HomeView() {
     refreshKey,
   )
 
-  // 默认启动目标：抽屉选择 > 上次启动 > 列表第一个
+  // 默认启动目标：抽屉选择 > 最近启动 > 列表第一个。
+  // 注意不读全局 selectedInstanceId——那会跟着实例页的浏览选中走，
+  // 导致首页按钮不跟随最近启动的实例
   const target = useMemo(() => {
     if (instances.length === 0) return null
-    return (
-      instances.find((i) => i.id === selectedInstanceId) ??
-      [...instances].sort((a, b) => (b.lastLaunchedAt ?? 0) - (a.lastLaunchedAt ?? 0))[0]
-    )
-  }, [instances, selectedInstanceId])
+    if (drawerPick) {
+      const picked = instances.find((i) => i.id === drawerPick)
+      if (picked) return picked
+    }
+    return [...instances].sort((a, b) => (b.lastLaunchedAt ?? 0) - (a.lastLaunchedAt ?? 0))[0]
+  }, [instances, drawerPick])
 
   const entry = target ? launchEntries[target.id] : undefined
   const busy = isBusy(entry)
@@ -222,6 +226,10 @@ export function HomeView() {
     setLaunching(true)
     try {
       await ipc.launchInstance(target.id)
+      // 启动受理成功：清抽屉选择（回退「最近启动」）并刷新实例列表，
+      // 让 lastLaunchedAt 立即生效——下次默认目标就是刚启动的这个
+      setDrawerPick(null)
+      refreshInstances()
     } catch (e) {
       setError(String(e))
     } finally {
@@ -498,6 +506,8 @@ export function HomeView() {
                     key={inst.id}
                     type="button"
                     onClick={() => {
+                      setDrawerPick(inst.id)
+                      // 同步实例页选中（跨页高亮一致）
                       setSelectedInstance(inst.id)
                       setDrawerOpen(false)
                     }}

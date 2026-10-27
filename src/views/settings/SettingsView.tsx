@@ -4,7 +4,7 @@ import { useUiStore } from '../../stores/uiStore'
 import { useBackgroundStore } from '../../stores/backgroundStore'
 import { effectiveIsDark } from '../../lib/theme'
 import { ipc } from '../../lib/ipc'
-import type { AppSettings } from '../../types/domain'
+import type { AppSettings, UpdateCheckResult } from '../../types/domain'
 import type { ThemeMode } from '../../types/ui'
 import { BackgroundCropDialog } from './BackgroundCropDialog'
 import { AboutView } from './AboutView'
@@ -69,6 +69,8 @@ export function Section({ title, children }: { title: string; children: React.Re
 function DownloadSourceSection() {
   const [mirrorsText, setMirrorsText] = useState<string | null>(null)
   const [downloadSource, setDownloadSource] = useState('auto')
+  const [marketListSource, setMarketListSource] = useState('official')
+  const [marketDownloadSource, setMarketDownloadSource] = useState('mirror')
   const [globalConcurrency, setGlobalConcurrency] = useState(64)
   const [perHostConcurrency, setPerHostConcurrency] = useState(16)
   const [saving, setSaving] = useState(false)
@@ -81,6 +83,8 @@ function DownloadSourceSection() {
       .then((s: AppSettings) => {
         setMirrorsText(s.mirrors.join('\n'))
         setDownloadSource(s.downloadSource || 'auto')
+        setMarketListSource(s.marketListSource || 'official')
+        setMarketDownloadSource(s.marketDownloadSource || 'mirror')
         setGlobalConcurrency(s.globalConcurrency)
         setPerHostConcurrency(s.perHostConcurrency)
       })
@@ -102,11 +106,15 @@ function DownloadSourceSection() {
           .map((l) => l.trim())
           .filter((l) => l.length > 0),
         downloadSource,
+        marketListSource,
+        marketDownloadSource,
         globalConcurrency,
         perHostConcurrency,
       })
       setMirrorsText(s.mirrors.join('\n'))
       setDownloadSource(s.downloadSource || 'auto')
+      setMarketListSource(s.marketListSource || 'official')
+      setMarketDownloadSource(s.marketDownloadSource || 'mirror')
       setGlobalConcurrency(s.globalConcurrency)
       setPerHostConcurrency(s.perHostConcurrency)
       setMessage('已保存：下载源与镜像列表实时生效；并发数修改需重启应用生效')
@@ -139,6 +147,38 @@ function DownloadSourceSection() {
             官方直连速度通常更快；若你的网络访问 Mojang 官方域名受限，可选镜像优先。
           </p>
         </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label className={labelCls} htmlFor="set-market-list">模组市场 · 列表加载源</label>
+            <select
+              id="set-market-list"
+              className={inputCls}
+              value={marketListSource}
+              onChange={(e) => setMarketListSource(e.target.value)}
+              disabled={saving || !dirty}
+            >
+              <option value="official">Modrinth 官方</option>
+              <option value="mirror">MCImirror 镜像</option>
+            </select>
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="set-market-download">模组市场 · 下载源</label>
+            <select
+              id="set-market-download"
+              className={inputCls}
+              value={marketDownloadSource}
+              onChange={(e) => setMarketDownloadSource(e.target.value)}
+              disabled={saving || !dirty}
+            >
+              <option value="mirror">MCImirror 镜像</option>
+              <option value="official">Modrinth 官方</option>
+            </select>
+          </div>
+        </div>
+        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+          作用于模组 / 资源市场与整合包的列表请求和文件下载。所选源为首选，
+          另一源始终自动兜底——首选源连不上时无缝切换，不影响使用；保存后立即生效。
+        </p>
         <div>
           <label className={labelCls} htmlFor="set-mirrors">镜像源列表</label>
           <textarea
@@ -387,6 +427,46 @@ function ModsSection() {
           刷新市场缓存
         </button>
       </div>
+    </Section>
+  )
+}
+
+/** 启动行为：启动实例时隐藏启动器，全部游戏退出后恢复显示（切换即保存） */
+function LaunchSection() {
+  const [hideOnLaunch, setHideOnLaunch] = useState<boolean | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    ipc
+      .getSettings()
+      .then((s: AppSettings) => setHideOnLaunch(s.hideOnLaunch))
+      .catch((e) => setError(String(e)))
+  }, [])
+
+  const toggle = async (v: boolean) => {
+    const prev = hideOnLaunch
+    setHideOnLaunch(v) // 立即反馈，失败再回滚
+    setError(null)
+    try {
+      const cur = await ipc.getSettings()
+      await ipc.saveSettings({ ...cur, hideOnLaunch: v })
+    } catch (e) {
+      setError(String(e))
+      setHideOnLaunch(prev)
+    }
+  }
+
+  return (
+    <Section title="启动">
+      {hideOnLaunch !== null && (
+        <Switch
+          checked={hideOnLaunch}
+          onChange={toggle}
+          label="启动实例时隐藏启动器"
+          desc="游戏启动后自动隐藏启动器窗口；关闭游戏后自动恢复显示。关闭 = 启动器始终显示"
+        />
+      )}
+      {error && <p className="text-xs text-red-500">{error}</p>}
     </Section>
   )
 }
@@ -716,6 +796,106 @@ function BackgroundSection() {
   )
 }
 
+/** 检查更新：启动检查开关 + 手动检查（放在「关于 PieMCL」入口下方） */
+function UpdateCheckSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [result, setResult] = useState<UpdateCheckResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    ipc
+      .getSettings()
+      .then((s) => setEnabled(s.updateCheckEnabled))
+      .catch((e) => setError(String(e)))
+  }, [])
+
+  /** 切换启动检查开关（保存设置即时生效） */
+  const toggleEnabled = async (v: boolean) => {
+    setEnabled(v)
+    try {
+      const cur = await ipc.getSettings()
+      await ipc.saveSettings({ ...cur, updateCheckEnabled: v })
+    } catch (e) {
+      setError(String(e))
+      setEnabled(!v) // 回滚 UI
+    }
+  }
+
+  /** 手动检查：忽略启动开关与跳过版本，结果直接展示 */
+  const runCheck = async () => {
+    setChecking(true)
+    setError(null)
+    setResult(null)
+    try {
+      const r = await ipc.checkUpdate(true)
+      setResult(r)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <Section title="检查更新">
+      <div className="space-y-3">
+        {enabled !== null && (
+          <Switch
+            checked={enabled}
+            onChange={(v) => void toggleEnabled(v)}
+            label="启动时检查更新"
+            desc="启动器启动后自动检查 GitHub Releases，有新版本时弹窗提醒"
+          />
+        )}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={runCheck}
+            disabled={checking}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors duration-150 hover:bg-accent-hover disabled:opacity-50"
+          >
+            {checking ? '检查中…' : '立即检查'}
+          </button>
+          <span className="text-xs text-neutral-500 dark:text-neutral-400">
+            数据来源：GitHub Releases（R3-141/PieMCL）
+          </span>
+        </div>
+        {error && (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-500/10 dark:text-red-300">
+            {error}
+          </p>
+        )}
+        {!error && result && !result.hasUpdate && (
+          <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+            已是最新版本（v{result.currentVersion}）
+          </p>
+        )}
+        {!error && result?.hasUpdate && (
+          <div className="space-y-2 rounded-lg border border-accent/40 px-3 py-3">
+            <p className="text-sm font-medium">
+              发现新版本 v{result.latestVersion}
+              <span className="ml-2 text-xs text-neutral-400">当前 v{result.currentVersion}</span>
+            </p>
+            {result.notes.trim() && (
+              <div className="max-h-40 overflow-y-auto rounded bg-neutral-100 px-2.5 py-2 text-xs whitespace-pre-wrap text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                {result.notes}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => void ipc.openExternal(result.htmlUrl)}
+              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-accent-hover"
+            >
+              前往 GitHub 下载
+            </button>
+          </div>
+        )}
+      </div>
+    </Section>
+  )
+}
+
 /** 设置：主题 / 主色 / 动画 / 窗口效果 / 入口显隐 / 数据目录 / 下载源 / 模组 / 关于 */
 export function SettingsView() {
   const [showAbout, setShowAbout] = useState(false)
@@ -884,6 +1064,7 @@ export function SettingsView() {
 
       <DownloadSourceSection />
       <ProxySection />
+      <LaunchSection />
       <ModsSection />
       <BackgroundSection />
       <DataDirSection />
@@ -904,6 +1085,9 @@ export function SettingsView() {
           <span className="text-xs text-neutral-400 dark:text-neutral-500">查看详情 →</span>
         </div>
       </button>
+
+      {/* 检查更新（位于「关于 PieMCL」下方） */}
+      <UpdateCheckSection />
     </div>
   )
 }

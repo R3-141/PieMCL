@@ -333,6 +333,25 @@ fn build_classpath(v: &Value, game_root: &Path) -> AppResult<String> {
         .join(";"))
 }
 
+/// 物理内存总量 MB（读取失败时为 0）
+pub fn total_memory_mb() -> u64 {
+    use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+    );
+    sys.total_memory() / (1024 * 1024)
+}
+
+/// 自动分配内存：物理内存一半，clamp [2048, 16384]，且不超过物理内存 - 2048；
+/// 物理内存不足 4GB（或读取失败）时回落 1024
+pub fn auto_memory_mb(total_mb: u64) -> u32 {
+    if total_mb < 4096 {
+        return 1024;
+    }
+    let cap = (total_mb as u32).saturating_sub(2048);
+    ((total_mb / 2) as u32).clamp(2048, 16384).min(cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +413,7 @@ mod tests {
             version: 17,
             arch: "x64".into(),
             vendor: "Temurin".into(),
+            custom: false,
         }
     }
 
@@ -659,6 +679,7 @@ mod tests {
             version: v,
             arch: arch.into(),
             vendor: "test".into(),
+            custom: false,
         };
         let list = vec![mk(8, "x64"), mk(17, "x64"), mk(21, "x64"), mk(17, "x86")];
         // 要求 17：在满足者中选最接近的 17（而非 21），x86 被过滤
@@ -670,5 +691,24 @@ mod tests {
         // 上限 8（1.16.5 等老版本）：只能选 8，17/21 被过滤
         assert_eq!(select_java(&list, 8, Some(8)).unwrap().version, 8);
         assert!(select_java(&list, 17, Some(8)).is_none());
+    }
+
+    #[test]
+    fn auto_memory_clamps_and_caps() {
+        // 读取失败 / 极小内存：回落 1024
+        assert_eq!(auto_memory_mb(0), 1024);
+        assert_eq!(auto_memory_mb(2048), 1024);
+        // 4GB：一半 2048
+        assert_eq!(auto_memory_mb(4096), 2048);
+        // 8GB：一半 4096
+        assert_eq!(auto_memory_mb(8192), 4096);
+        // 16GB：一半 8192
+        assert_eq!(auto_memory_mb(16384), 8192);
+        // 64GB：封顶 16384
+        assert_eq!(auto_memory_mb(65536), 16384);
+        // 不超过物理内存 - 2048（5GB 时 cap = 3072 > 一半 2560，不触发）
+        assert_eq!(auto_memory_mb(5120), 2560);
+        // 6GB 时 cap = 4096，一半 3072 依然不受 cap 影响
+        assert_eq!(auto_memory_mb(6144), 3072);
     }
 }

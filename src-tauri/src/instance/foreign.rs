@@ -185,14 +185,24 @@ async fn import_one(paths: &LauncherPaths, dir: &Path, id: &str) -> Result<(), S
         return Err("版本 json 缺少 mainClass（疑似损坏）".into());
     }
 
-    // MC 版本 = 继承链根（无 inheritsFrom 的最祖先）的 id
+    // MC 版本：优先从继承链 libraries 推导——整合包根 json 的 id 常被自定义成
+    // 整合包名（如 HMCL 装包生成 id="Booster FPS"），不能直接当版本号
     let root = chain.last().expect("链非空");
-    let mc_version = root
+    let root_id = root
         .json
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or(id)
         .to_string();
+    let mc_version = derive_mc_version_from_libraries(&merged)
+        .or_else(|| {
+            if looks_like_mc_version(&root_id) {
+                Some(root_id.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(root_id);
     let loader = detect_loader(&chain);
 
     // 写元数据（新增文件，零侵入）
@@ -246,6 +256,225 @@ fn merge_chain(chain: &[ChainNode]) -> Result<Value, String> {
     Ok(acc)
 }
 
+/// MC 版本形态校验：形如 1.21.1 / 1.8.9（多段全数字）。
+/// 用于识别"版本号被误写成整合包名"的元数据（市场 facet 非法会 500/400）
+pub(crate) fn looks_like_mc_version(s: &str) -> bool {
+    let s = s.trim();
+    if !s.contains('.') {
+        return false;
+    }
+    s.split('.').all(|seg| {
+        !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// 从版本 json 的 libraries 推导真实 MC 版本：
+///   Forge：net.minecraftforge:forge:1.20.1-47.2.0 / fmlloader:1.20.1-47.2.0
+///   Fabric：net.fabricmc:intermediary:1.21.1
+///   Quilt：org.quiltmc:hashed:1.21.1
+///   OptiFine：optifine:OptiFine:1.20.1-HD_U_I6
+///   NeoForge 1.20.2+：net.neoforged:neoforge:20.4.237（20.4 ↔ 1.20.4）
+/// 整合包版本 json 的根 id 常被自定义成包名，libraries 是唯一可靠信号。
+fn derive_mc_version_from_libraries(merged: &Value) -> Option<String> {
+    let libs = merged.get("libraries")?.as_array()?;
+    for lib in libs {
+        let name = lib.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let segs: Vec<&str> = name.split(':').collect();
+        if segs.len() < 3 {
+            continue;
+        }
+        let (artifact, version) = (segs[1], segs[2]);
+        let leading = || {
+            version
+                .split(['-', '+'])
+                .next()
+                .unwrap_or(version)
+                .to_string()
+        };
+        match artifact {
+            "forge" | "fmlloader" | "minecraftforge" => {
+                let mc = leading();
+                if looks_like_mc_version(&mc) {
+                    return Some(mc);
+                }
+            }
+            "intermediary" | "hashed" if looks_like_mc_version(version) => {
+                return Some(version.to_string());
+            }
+            "OptiFine" => {
+                let mc = leading();
+                if looks_like_mc_version(&mc) {
+                    return Some(mc);
+                }
+            }
+            "neoforge" | "neoforge-loader" => {
+                let nums: Vec<u32> =
+                    version.split('.').filter_map(|x| x.parse().ok()).collect();
+                if nums.len() >= 2 && nums[0] >= 20 {
+                    return Some(format!("1.{}.{}", nums[0], nums[1]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 修复历史导入的外部实例的 mc_version 误记：旧版导入直接把继承链根 id（常为
+/// 整合包名）当 MC 版本存入元数据，导致市场搜索 facet 非法被服务端拒绝。
+/// 元数据值不像 MC 版本且冻结 version.json 存在时，从 libraries 重新推导并回写。
+/// 返回修复数（幂等：值合法即跳过）。
+pub async fn repair_mc_versions(paths: &LauncherPaths) -> usize {
+    let mut fixed = 0;
+    let Ok(mut entries) = tokio::fs::read_dir(paths.versions_root()).await else {
+        return 0;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let dir = entry.path();
+        let pie = dir.join(".pie");
+        let meta_path = pie.join("instance.json");
+        if !meta_path.is_file() {
+            continue; // 非自家实例
+        }
+        let Ok(text) = tokio::fs::read_to_string(&meta_path).await else {
+            continue;
+        };
+        let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(mc) = meta
+            .get("mcVersion")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if looks_like_mc_version(&mc) {
+            continue; // 已是合法版本形态
+        }
+        let Ok(vtext) = tokio::fs::read_to_string(pie.join("version.json")).await else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&vtext) else {
+            continue;
+        };
+        if let (Some(new_mc), Some(obj)) =
+            (derive_mc_version_from_libraries(&v), meta.as_object_mut())
+        {
+            obj.insert("mcVersion".into(), serde_json::json!(new_mc));
+            if tokio::fs::write(
+                &meta_path,
+                serde_json::to_string_pretty(&meta).unwrap_or_default(),
+            )
+            .await
+            .is_ok()
+            {
+                fixed += 1;
+                eprintln!("[foreign] 修复 mc_version：{mc} → {new_mc}（{}）", dir.display());
+            }
+        }
+    }
+    fixed
+}
+
+/// 外部改动自愈：版本文件夹被用户在资源管理器中手动改名时，.pie\instance.json
+/// 里的 id 仍是旧名，导致列表返回失效 id、所有操作报「实例不存在」。
+/// 以文件夹名为准回写元数据，并对齐内部文件命名：
+///   {旧id}.jar / {旧id}.json → {新id}.jar / {新id}.json
+/// version json 与 .pie\version.json 的 id 字段同步改写。
+/// 返回修复的实例数（幂等：一致即跳过）。
+pub async fn reconcile_renamed_instances(paths: &LauncherPaths) -> usize {
+    let mut fixed = 0;
+    let Ok(mut entries) = tokio::fs::read_dir(paths.versions_root()).await else {
+        return 0;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let meta_path = dir.join(".pie").join("instance.json");
+        let Ok(text) = tokio::fs::read_to_string(&meta_path).await else {
+            continue;
+        };
+        let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(folder) = dir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let Some(old_id) = meta.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        if old_id == folder {
+            continue;
+        }
+        if let Err(e) = rename_instance_files(&dir, &old_id, &folder).await {
+            eprintln!("[foreign] 实例目录改名对齐失败 {old_id} → {folder}：{e}");
+            continue;
+        }
+        // 元数据回写（id 与文件夹名一致；name 若用户未自定义过则一并跟随）
+        let name_follows = meta.get("name").and_then(|v| v.as_str()) == Some(old_id.as_str());
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(folder));
+            if name_follows {
+                obj.insert("name".to_string(), serde_json::json!(folder));
+            }
+        }
+        if let Err(e) = tokio::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()).await {
+            eprintln!("[foreign] 实例元数据回写失败 {folder}：{e}");
+            continue;
+        }
+        eprintln!("[foreign] 实例目录改名已对齐：{old_id} → {folder}");
+        fixed += 1;
+    }
+    fixed
+}
+
+/// 文件夹改名后的内部文件对齐：主 jar、版本 json、冻结版 version.json 的 id 字段
+async fn rename_instance_files(dir: &Path, old_id: &str, new_id: &str) -> Result<(), String> {
+    // 主 jar：{旧id}.jar → {新id}.jar（新名已存在则跳过，不覆盖）
+    let old_jar = dir.join(format!("{old_id}.jar"));
+    let new_jar = dir.join(format!("{new_id}.jar"));
+    if old_jar.is_file() && !new_jar.exists() {
+        tokio::fs::rename(&old_jar, &new_jar)
+            .await
+            .map_err(|e| format!("重命名主 jar 失败：{e}"))?;
+    }
+    // 版本 json：改名并改写 id 字段
+    let old_json = dir.join(format!("{old_id}.json"));
+    let new_json = dir.join(format!("{new_id}.json"));
+    if old_json.is_file() {
+        let text = tokio::fs::read_to_string(&old_json)
+            .await
+            .map_err(|e| format!("读取版本 json 失败：{e}"))?;
+        let mut vjson: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("版本 json 解析失败：{e}"))?;
+        if let Some(obj) = vjson.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(new_id));
+        }
+        tokio::fs::write(&new_json, serde_json::to_string_pretty(&vjson).unwrap_or_default())
+            .await
+            .map_err(|e| format!("写入版本 json 失败：{e}"))?;
+        if old_json != new_json {
+            let _ = tokio::fs::remove_file(&old_json).await;
+        }
+    }
+    // 冻结版（外部实例导入产物）：仅改写 id 字段
+    let frozen = dir.join(".pie").join("version.json");
+    if frozen.is_file() {
+        if let Ok(text) = tokio::fs::read_to_string(&frozen).await {
+            if let Ok(mut vjson) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(obj) = vjson.as_object_mut() {
+                    obj.insert("id".to_string(), serde_json::json!(new_id));
+                }
+                let _ = tokio::fs::write(&frozen, serde_json::to_string_pretty(&vjson).unwrap_or_default()).await;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +493,60 @@ mod tests {
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciles_externally_renamed_folder() {
+        let root = temp_root();
+        let paths = paths_of(&root);
+        let game = root.join(".minecraft");
+
+        // 自家实例，用户在资源管理器里把文件夹从 old 改成 new-id
+        let dir = game.join("versions/new-id");
+        std::fs::create_dir_all(dir.join(".pie")).unwrap();
+        std::fs::write(
+            dir.join(".pie/instance.json"),
+            r#"{ "id": "old", "name": "old", "mcVersion": "1.20.1", "createdAt": 1 }"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("old.jar"), b"jar").unwrap();
+        std::fs::write(
+            dir.join("old.json"),
+            r#"{ "id": "old", "mainClass": "net.minecraft.client.main.Main" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".pie/version.json"),
+            r#"{ "id": "old", "mainClass": "net.minecraft.client.main.Main" }"#,
+        )
+        .unwrap();
+
+        let n = reconcile_renamed_instances(&paths).await;
+        assert_eq!(n, 1);
+
+        // 元数据以文件夹名为准
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".pie/instance.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["id"], "new-id");
+        assert_eq!(meta["name"], "new-id");
+        // 内部文件对齐改名
+        assert!(dir.join("new-id.jar").is_file());
+        assert!(!dir.join("old.jar").exists());
+        assert!(dir.join("new-id.json").is_file());
+        assert!(!dir.join("old.json").exists());
+        let vjson: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("new-id.json")).unwrap())
+                .unwrap();
+        assert_eq!(vjson["id"], "new-id");
+        let frozen: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".pie/version.json")).unwrap())
+                .unwrap();
+        assert_eq!(frozen["id"], "new-id");
+
+        // 幂等：再次执行不再改动
+        assert_eq!(reconcile_renamed_instances(&paths).await, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
